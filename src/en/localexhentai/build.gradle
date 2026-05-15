@@ -1,0 +1,8 @@
+ext {
+    extName = 'local-exhentai'
+    extClass = '.EHFactory'
+    extVersionCode = 28
+    isNsfw = true
+}
+
+apply from: "$rootDir/common.gradle"
