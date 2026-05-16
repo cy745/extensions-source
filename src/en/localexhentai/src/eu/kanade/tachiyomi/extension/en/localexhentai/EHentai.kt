@@ -376,11 +376,51 @@ abstract class EHentai(
         return exGet(uri.toString(), page)
     }
 
-    override fun latestUpdatesRequest(page: Int) = exGet(baseUrl, page)
+    override fun latestUpdatesRequest(page: Int): Request {
+        if (getDownloadedModePref()) {
+            val cacheUrl = getCacheServerUrlPref()
+            if (cacheUrl.isNotBlank()) {
+                val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+                return GET("$apiBase/api/downloaded?page=$page")
+            }
+        }
+        return exGet(baseUrl, page)
+    }
+
+    override fun latestUpdatesParse(response: Response): MangasPage {
+        if (getDownloadedModePref()) return parseDownloadedPage(response)
+        return genericMangaParse(response)
+    }
+
+    private fun parseDownloadedPage(response: Response): MangasPage {
+        val cacheUrl = getCacheServerUrlPref()
+        val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+        return try {
+            val json = org.json.JSONObject(response.body?.string() ?: "{}")
+            val list = json.optJSONArray("list") ?: return MangasPage(emptyList(), false)
+            val hasNext = json.optBoolean("hasNext", false)
+            val mangas = mutableListOf<SManga>()
+            for (i in 0 until list.length()) {
+                val item = list.getJSONObject(i)
+                val gid = item.optString("gid", "")
+                val title = item.optString("title", "")
+                val mangaUrl = item.optString("url", "")
+                mangas.add(
+                    SManga.create().apply {
+                        this.title = title.ifEmpty { "(untitled) $gid" }
+                        url = if (mangaUrl.startsWith("/")) mangaUrl else "/g/$gid/"
+                        thumbnail_url = "$apiBase/api/galleries/$gid/cover.webp"
+                    },
+                )
+            }
+            MangasPage(mangas, hasNext)
+        } catch (_: Exception) {
+            MangasPage(emptyList(), false)
+        }
+    }
 
     override fun popularMangaParse(response: Response) = genericMangaParse(response)
     override fun searchMangaParse(response: Response) = genericMangaParse(response)
-    override fun latestUpdatesParse(response: Response) = genericMangaParse(response)
 
     private fun exGet(url: String, page: Int? = null, additionalHeaders: Headers? = null, cache: Boolean = true): Request {
         // pages no longer exist, if app attempts to go to the first page after a request, do not include the page append
@@ -1107,6 +1147,11 @@ abstract class EHentai(
         private const val CACHE_SERVER_URL_PREF_TITLE = "Cache Server URL"
         private const val CACHE_SERVER_URL_PREF_SUMMARY = "Local cache server URL (e.g. http://192.168.1.100:8080). When set, all requests go through this server."
         private const val CACHE_SERVER_URL_PREF_DEFAULT_VALUE = ""
+
+        private const val DOWNLOADED_MODE_PREF_KEY = "DOWNLOADED_MODE"
+        private const val DOWNLOADED_MODE_PREF_TITLE = "Show Downloaded in Latest"
+        private const val DOWNLOADED_MODE_PREF_SUMMARY = "When enabled, the 'Latest' tab shows locally downloaded galleries from the cache server"
+        private const val DOWNLOADED_MODE_PREF_DEFAULT_VALUE = false
     }
 
     // Preferences
@@ -1171,7 +1216,15 @@ abstract class EHentai(
             setDefaultValue(CACHE_SERVER_URL_PREF_DEFAULT_VALUE)
         }
 
+        val downloadedModePref = CheckBoxPreference(screen.context).apply {
+            key = DOWNLOADED_MODE_PREF_KEY
+            title = DOWNLOADED_MODE_PREF_TITLE
+            summary = DOWNLOADED_MODE_PREF_SUMMARY
+            setDefaultValue(DOWNLOADED_MODE_PREF_DEFAULT_VALUE)
+        }
+
         screen.addPreference(cacheServerUrlPref)
+        screen.addPreference(downloadedModePref)
         screen.addPreference(forceEhPref)
         screen.addPreference(memberIdPref)
         screen.addPreference(passHashPref)
@@ -1190,6 +1243,8 @@ abstract class EHentai(
 
     private fun getCacheServerUrlPref(): String = preferences.getString(CACHE_SERVER_URL_PREF_KEY, CACHE_SERVER_URL_PREF_DEFAULT_VALUE)
         ?: CACHE_SERVER_URL_PREF_DEFAULT_VALUE
+
+    private fun getDownloadedModePref(): Boolean = preferences.getBoolean(DOWNLOADED_MODE_PREF_KEY, DOWNLOADED_MODE_PREF_DEFAULT_VALUE)
 
     private fun getCookieValue(cookieTitle: String, defaultValue: String, prefKey: String): String {
         val cookies = webViewCookieManager.getCookie("https://forums.e-hentai.org")

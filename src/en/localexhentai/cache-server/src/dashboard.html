@@ -3,161 +3,484 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>EH Cache Dashboard</title>
+<title>Cache Server Dashboard</title>
 <style>
-  :root { --bg: #1a1a2e; --card: #16213e; --accent: #e94560; --text: #eee; --muted: #889; --green: #2ecc71; --orange: #f39c12; --red: #e74c3c; --blue: #3498db; }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
-  h1 { font-size: 1.5rem; margin-bottom: 20px; color: var(--accent); }
-  h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--text); }
-  .grid { display: grid; grid-template-columns: 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
-  @media (min-width: 768px) { .grid { grid-template-columns: 1fr 1fr; } .full { grid-column: 1 / -1; } }
-  .card { background: var(--card); border-radius: 10px; padding: 16px; border: 1px solid #2a2a4a; }
-  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; }
-  .stat { flex: 1; min-width: 120px; text-align: center; padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px; }
-  .stat .val { font-size: 1.4rem; font-weight: bold; }
-  .stat .lbl { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
-  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #2a2a4a; }
-  th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 500; }
-  .badge-ok { background: rgba(46,204,113,0.2); color: var(--green); }
-  .badge-warn { background: rgba(243,156,18,0.2); color: var(--orange); }
-  .badge-err { background: rgba(231,76,60,0.2); color: var(--red); }
-  .badge-info { background: rgba(52,152,219,0.2); color: var(--blue); }
-  .progress { width: 100%; height: 6px; background: #2a2a4a; border-radius: 3px; overflow: hidden; margin-top: 4px; }
-  .progress-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.5s; }
-  .empty { text-align: center; color: var(--muted); padding: 24px; font-size: 0.9rem; }
-  .gallery-link { color: var(--blue); text-decoration: none; }
-  .gallery-link:hover { text-decoration: underline; }
-  .actions { display: flex; gap: 4px; }
-  .btn-sm { padding: 2px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
-  .btn-del { background: rgba(231,76,60,0.2); color: var(--red); }
-  .btn-del:hover { background: rgba(231,76,60,0.4); }
-  .refresh { float: right; font-size: 0.8rem; color: var(--muted); cursor: pointer; }
-  .refresh:hover { color: var(--text); }
-  .title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; display: inline-block; }
-  #sysInfo { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
-  .si-item { text-align: center; padding: 8px; }
-  .si-item .v { font-size: 1.1rem; font-weight: bold; }
-  .si-item .l { font-size: 0.7rem; color: var(--muted); }
-  .loading { text-align: center; padding: 40px; color: var(--muted); }
+:root {
+  --bg: #fafafa; --surface: #fff; --text: #1a1a1a; --text-secondary: #666;
+  --border: #e0e0e0; --border-light: #e8e8e8; --muted: #999; --muted-light: #ccc;
+  --divider: #eee; --section-line: #e0e0e0; --input-bg: #fff;
+  --btn-border: #d0d0d0; --btn-hover: #000; --accent-green: #2ecc71;
+  --status-dot: #2ecc71; --shadow: none;
+}
+[data-theme="dark"] {
+  --bg: #121212; --surface: #1e1e1e; --text: #e0e0e0; --text-secondary: #999;
+  --border: #333; --border-light: #2a2a2a; --muted: #666; --muted-light: #555;
+  --divider: #2a2a2a; --section-line: #2a2a2a; --input-bg: #2a2a2a;
+  --btn-border: #444; --btn-hover: #fff; --accent-green: #2ecc71;
+  --status-dot: #2ecc71; --shadow: none;
+}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]):not([data-theme="dark"]){--bg:#121212;--surface:#1e1e1e;--text:#e0e0e0;--text-secondary:#999;--border:#333;--border-light:#2a2a2a;--muted:#666;--muted-light:#555;--divider:#2a2a2a;--section-line:#2a2a2a;--input-bg:#2a2a2a;--btn-border:#444;--btn-hover:#fff;--accent-green:#2ecc71;--status-dot:#2ecc71;--shadow:none}}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:16px;-webkit-text-size-adjust:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif;
+  background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;transition:background .2s,color .2s}
+
+.app{max-width:1280px;margin:0 auto;padding:clamp(16px,4vw,48px)}
+.header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;
+  margin-bottom:clamp(24px,4vw,48px);gap:8px}
+.header h1{font-size:clamp(1.25rem,2.5vw,1.75rem);font-weight:700;letter-spacing:-0.03em;color:var(--text)}
+.header-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+@media(max-width:480px){.header-actions{gap:4px}.header .refresh-btn{padding:6px 8px;font-size:.65rem}.header .theme-btn{padding:4px 5px;font-size:.7rem}}
+.theme-btn{background:none;border:1px solid var(--btn-border);border-radius:4px;padding:4px 10px;
+  font-size:.85rem;cursor:pointer;color:var(--text);line-height:1;transition:all .15s}
+.theme-btn:hover{border-color:var(--text)}
+.refresh-btn{background:none;border:2px solid var(--text);border-radius:4px;padding:6px 16px;
+  font-size:.75rem;font-weight:600;color:var(--text);cursor:pointer;letter-spacing:.03em;
+  transition:all .15s}
+.refresh-btn:hover{background:var(--text);color:var(--bg)}
+.refresh-btn--with-time{padding-right:12px}
+.refresh-time{font-weight:400;font-size:.7rem;opacity:.6}
+@media(max-width:480px){.refresh-time{display:none}}
+.header-divider{width:1px;height:20px;background:var(--border);margin:0 2px;flex-shrink:0}
+.btn-label-narrow{display:none}
+@media(max-width:480px){.btn-label-wide{display:none}.btn-label-narrow{display:inline}}
+
+.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:1px;background:var(--section-line);
+  border:1px solid var(--section-line);margin-bottom:clamp(20px,3vw,36px)}
+@media(min-width:480px){.metrics{grid-template-columns:repeat(4,1fr)}}
+.metric{background:var(--surface);padding:clamp(12px,2vw,24px);text-align:center}
+.metric-value{font-size:clamp(1.5rem,3vw,2.25rem);font-weight:700;letter-spacing:-.03em;line-height:1.1}
+.metric-label{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:4px;font-weight:500}
+.metric-sub{margin-top:8px;font-size:.7rem;color:var(--muted-light)}
+.metric.downloaded .metric-value{color:var(--text)}
+.metric.failed .metric-value{color:#e74c3c}
+
+.section{margin-bottom:clamp(24px,4vw,40px)}
+.section-header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;margin-bottom:12px;gap:8px}
+.section-title{font-size:.85rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+.section-count{font-size:.75rem;color:var(--muted-light);font-weight:500}
+
+.jobs{display:flex;flex-direction:column;gap:1px;background:var(--border-light);border:1px solid var(--border-light)}
+.job{background:var(--surface);padding:clamp(12px,2vw,20px)}
+.job-meta{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:8px;gap:6px}
+.job-gid{font-size:.8rem;font-weight:600;color:var(--text)}
+.job-status{font-size:.65rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
+  padding:2px 8px;border-radius:3px;background:var(--divider);color:var(--text-secondary)}
+.job-status.downloading{background:#fff3e0;color:#e65100}
+.job-status.extracting{background:#e3f2fd;color:#1565c0}
+.job-status.queued{background:var(--divider);color:var(--muted)}
+.job-status.archiver_access{background:#f3e5f5;color:#7b1fa2}
+.job-message{font-size:.7rem;color:var(--muted);margin-bottom:6px}
+.progress-track{height:4px;background:var(--divider);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;background:var(--text);border-radius:2px;transition:width .5s ease}
+
+.gallery-grid{display:grid;gap:1px;background:var(--border-light);border:1px solid var(--border-light)}
+@media(min-width:640px){.gallery-grid{grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}}
+.gallery-card{background:var(--surface);padding:clamp(12px,1.5vw,20px);display:flex;flex-direction:row;gap:16px;align-items:flex-start}
+.gallery-card--filler{opacity:0;pointer-events:none}
+.gallery-thumb-wrap{width:64px;height:88px;flex-shrink:0;border-radius:2px;overflow:hidden;background:var(--divider);border:1px solid var(--border);position:relative}
+.gallery-thumb{width:100%;height:100%;object-fit:cover;display:block}
+.thumb-placeholder{width:100%;height:100%;background:var(--divider);display:flex;align-items:center;justify-content:center;color:var(--muted-light);font-size:1.2rem}
+.gallery-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+.gallery-title{font-size:.85rem;font-weight:600;color:var(--text);line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.4em}
+.gallery-meta{display:flex;flex-wrap:wrap;gap:12px;font-size:.7rem;color:var(--muted)}
+.gallery-meta span{display:inline-flex;align-items:center;gap:4px}
+.gallery-actions{display:flex;gap:4px;margin-top:auto;padding-top:8px}
+
+.btn{background:none;border:1px solid var(--btn-border);border-radius:3px;padding:4px 12px;
+  font-size:.7rem;font-weight:500;color:var(--text-secondary);cursor:pointer;transition:all .1s;
+  text-decoration:none;display:inline-flex;align-items:center;gap:4px}
+.btn:hover{border-color:var(--btn-hover);color:var(--btn-hover)}
+.btn-delete{border-color:transparent;color:#e74c3c}
+.btn-delete:hover{border-color:#e74c3c;background:rgba(231,76,60,.1)}
+.btn-retry{font-size:.65rem;padding:2px 10px;flex-shrink:0}
+
+.log{display:flex;flex-direction:column;gap:1px;background:var(--border-light);border:1px solid var(--border-light);max-height:360px;overflow-y:auto}
+.log-entry{background:var(--surface);padding:clamp(8px,1vw,14px) clamp(12px,1.5vw,20px);display:flex;
+  flex-wrap:wrap;align-items:baseline;gap:8px}
+.log-time{font-size:.65rem;color:var(--muted-light);font-weight:500;font-variant-numeric:tabular-nums;min-width:130px}
+.log-gid{font-size:.75rem;font-weight:600;color:var(--text-secondary);min-width:80px}
+.log-msg{font-size:.75rem;color:var(--muted);flex:1}
+.log-msg.error{color:#e74c3c}
+
+.search-wrap{position:relative;margin-bottom:12px}
+.search-wrap input{width:100%;border:1px solid var(--border);border-radius:4px;padding:8px 12px;
+  font-size:.8rem;font-family:inherit;background:var(--input-bg);color:var(--text);outline:none;transition:border-color .15s}
+.search-wrap input:focus{border-color:var(--text)}
+.paginator{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;
+  gap:12px;margin-top:12px;padding:12px 0;border-top:1px solid var(--border-light)}
+.paginator-info{font-size:.7rem;color:var(--muted);letter-spacing:.02em}
+.paginator-controls{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.paginator-select{border:1px solid var(--btn-border);border-radius:3px;padding:4px 6px;
+  font-size:.7rem;font-family:inherit;background:var(--input-bg);color:var(--text);cursor:pointer;
+  outline:none;margin-right:8px}
+.paginator-btn{background:none;border:1px solid var(--btn-border);border-radius:3px;
+  padding:4px 10px;font-size:.75rem;font-weight:500;color:var(--text-secondary);cursor:pointer;
+  transition:all .1s;min-width:30px;text-align:center}
+.paginator-btn:hover:not(:disabled):not(.active){border-color:var(--text);color:var(--text)}
+.paginator-btn.active{background:var(--text);border-color:var(--text);color:var(--bg)}
+.paginator-btn:disabled{opacity:.3;cursor:default}
+.paginator-dots{font-size:.75rem;color:var(--muted-light);padding:0 2px}
+.dl-input{width:100%;border:1px solid var(--border);border-radius:4px;padding:10px 12px;
+  font-size:.85rem;font-family:inherit;background:var(--input-bg);color:var(--text);outline:none;margin-top:8px}
+.dl-input:focus{border-color:var(--text)}
+.search-wrap input::placeholder{color:var(--muted-light)}
+
+.empty{background:var(--surface);border:1px solid var(--border-light);padding:clamp(24px,4vw,48px) clamp(16px,3vw,32px);text-align:center}
+.empty-icon{font-size:1.5rem;margin-bottom:8px;opacity:.3}
+.empty-text{font-size:.8rem;color:var(--muted);font-weight:500}
+
+.loading{background:var(--surface);border:1px solid var(--border-light);padding:clamp(32px,5vw,64px) 20px;text-align:center}
+.loading-dot{display:inline-block;width:6px;height:6px;background:var(--muted-light);border-radius:50%;
+  animation:dot 1.2s infinite alternate;margin:0 3px}
+.loading-dot:nth-child(2){animation-delay:.2s}
+.loading-dot:nth-child(3){animation-delay:.4s}
+@keyframes dot{to{background:var(--text);transform:translateY(-4px)}}
+
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);
+  padding:10px 24px;border-radius:6px;font-size:.8rem;font-weight:500;z-index:100;
+  opacity:0;transition:opacity .3s;pointer-events:none}
+.toast.show{opacity:1}
+
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0);z-index:200;
+  justify-content:center;align-items:center;padding:20px;display:flex;
+  opacity:0;pointer-events:none;transition:background .25s,opacity .25s}
+.modal-overlay.active{background:rgba(0,0,0,.4);opacity:1;pointer-events:auto}
+.modal{background:var(--surface);border-radius:8px;padding:clamp(20px,3vw,36px);max-width:480px;width:100%;
+  transform:translateY(24px) scale(.97);transition:transform .25s ease,opacity .25s;opacity:0}
+.modal-overlay.active .modal{transform:translateY(0) scale(1);opacity:1}
+.modal h3{font-size:1rem;font-weight:700;margin-bottom:8px;letter-spacing:-.02em}
+.modal p{font-size:.85rem;color:var(--text-secondary);margin-bottom:20px;line-height:1.5}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end}
+.modal .btn{border-color:var(--btn-border);padding:8px 20px;font-size:.8rem}
+.modal .btn-primary{background:var(--text);border-color:var(--text);color:var(--bg)}
+.modal .btn-primary:hover{opacity:.8}
 </style>
 </head>
 <body>
-<h1>📦 EH Cache Dashboard <span class="refresh" onclick="load()">↻ refresh</span></h1>
-<div class="grid" id="app">
-  <div class="loading card full">Loading...</div>
-</div>
+<div class="toast" id="toast"></div>
+<div class="modal-overlay" id="modalOverlay"><div class="modal"><h3 id="modalTitle"></h3><p id="modalBody"></p><div class="modal-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" id="modalConfirm" onclick="closeModal()">Confirm</button></div></div></div>
+<div id="app"></div>
 
-<script>
-async function load() {
-  const app = document.getElementById('app');
-  try {
-    const res = await fetch('/api/dashboard');
-    const data = await res.json();
-    app.innerHTML = render(data);
-  } catch (err) {
-    app.innerHTML = `<div class="card full" style="color:var(--red)">Failed to load: ${err.message}</div>`;
-  }
+<script type="module">
+import { html, render, useState, useEffect, useRef } from 'https://unpkg.com/htm/preact/standalone.module.js';
+
+const API_BASE = '/api';
+let modalResolve = null;
+
+window.confirmAction = (title, body) => new Promise(r => {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').textContent = body;
+  document.getElementById('modalOverlay').classList.add('active');
+  const cb = document.getElementById('modalConfirm');
+  const nc = cb.cloneNode(true); cb.replaceWith(nc);
+  nc.addEventListener('click', () => { closeModal(); r(true); });
+  modalResolve = r;
+});
+window.closeModal = () => { document.getElementById('modalOverlay').classList.remove('active'); };
+document.getElementById('modalOverlay').addEventListener('click', e => { if (e.target === e.currentTarget) closeModal(); modalResolve?.(false); });
+
+function toast(msg) {
+  const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
 }
 
-function render(data) {
-  const { queued, completed, failed, system } = data;
-  const totalActive = queued.length;
-  const totalDone = completed.length;
-  const totalFailed = failed.length;
+function fmtSize(b) { if (!b) return '—'; const mb = b / 1024 / 1024; return mb >= 1024 ? '(' + (mb / 1024).toFixed(1) + ' GiB)' : '(' + mb.toFixed(0) + ' MiB)'; }
+function relTime(ts) { if (!ts) return ''; const s = (Date.now() - new Date(ts).getTime()) / 1000; if (s < 10) return 'just now'; if (s < 60) return Math.floor(s) + 's ago'; if (s < 3600) return Math.floor(s / 60) + 'm ago'; return Math.floor(s / 3600) + 'h ago'; }
 
-  return `
-    <!-- Stats -->
-    <div class="card full">
-      <div class="stat-row">
-        <div class="stat"><div class="val" style="color:var(--blue)">${totalActive}</div><div class="lbl">In Progress</div></div>
-        <div class="stat"><div class="val" style="color:var(--green)">${totalDone}</div><div class="lbl">Downloaded</div></div>
-        <div class="stat"><div class="val" style="color:var(--red)">${totalFailed}</div><div class="lbl">Failed</div></div>
-        <div class="stat"><div class="val" style="color:var(--text)">${system.diskUsed || 'N/A'}</div><div class="lbl">Disk Used</div></div>
-        <div class="stat"><div class="val" style="color:var(--text)">${system.diskFree || 'N/A'}</div><div class="lbl">Disk Free</div></div>
+async function deleteGallery(gid) {
+  try { const r = await fetch(API_BASE + '/delete?gid=' + gid, { method: 'POST' }); if (!r.ok) throw new Error((await r.json()).error || 'delete failed'); toast('Deleted #' + gid); return true; } catch (e) { toast('Delete failed: ' + e.message); return false; }
+}
+
+// ── Components ──
+
+function Metrics({ active, done, failed, diskUsed, diskFree }) {
+  return html`<div class="metrics">
+    <div class="metric active"><div class="metric-value">${active}</div><div class="metric-label">Active</div></div>
+    <div class="metric downloaded"><div class="metric-value">${done}</div><div class="metric-label">Downloaded</div></div>
+    <div class="metric failed"><div class="metric-value">${failed}</div><div class="metric-label">Failed</div></div>
+    <div class="metric storage"><div class="metric-value">${diskUsed > 0 ? fmtSize(diskUsed) : '—'}</div><div class="metric-label">Storage</div><div class="metric-sub">${diskFree > 0 ? fmtSize(diskFree) + ' free' : '—'}</div></div>
+  </div>`;
+}
+
+function ActiveDownloads({ jobs }) {
+  if (jobs.length === 0) return html`<div class="section"><div class="section-header"><span class="section-title">Active Downloads</span></div><div class="empty"><div class="empty-icon">○</div><div class="empty-text">No active downloads</div></div></div>`;
+  return html`<div class="section">
+    <div class="section-header"><span class="section-title">Active Downloads</span><span class="section-count">${jobs.length} task${jobs.length !== 1 ? 's' : ''}</span></div>
+    <div class="jobs">${jobs.map(j => {
+      const pct = j.progress || 0;
+      const cls = ({ downloading: 'downloading', extracting: 'extracting', queued: 'queued', archiver_access: 'archiver_access' })[j.status] || '';
+      return html`<div class="job">
+        <div class="job-meta"><span class="job-gid">#${j.gid}</span><span class="job-status ${cls}">${j.status}</span></div>
+        ${j.message ? html`<div class="job-message">${j.message}</div>` : ''}
+        <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+      </div>`;
+    })}</div>
+  </div>`;
+}
+
+function GalleryCard({ g }) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const size = g.size ? '(' + (g.size / 1024 / 1024).toFixed(0) + ' MiB)' : '';
+  const handleDelete = async () => {
+    if (await window.confirmAction('Delete Gallery #' + g.gid, 'Remove gallery files and history. This cannot be undone.')) {
+      if (await deleteGallery(g.gid)) window._reload();
+    }
+  };
+  return html`<div class="gallery-card">
+    <div class="gallery-thumb-wrap">
+      ${imgFailed ? html`<div class="thumb-placeholder">▣</div>`
+        : html`<img class="gallery-thumb" src="${API_BASE}/galleries/${g.gid}/cover.webp" alt="" loading="lazy" onError=${() => setImgFailed(true)} />`}
+    </div>
+    <div class="gallery-info">
+      <div class="gallery-title">${g.title || 'Untitled'}</div>
+      <div class="gallery-meta">
+        <span>#${g.gid}</span>
+        <span>${g.totalImages || '?'} pages</span>
+        <span>${size || '—'}</span>
+        <span>${relTime(g.downloadedAt)}</span>
+      </div>
+      <div class="gallery-actions">
+        <a class="btn" href="${API_BASE}/galleries/${g.gid}/" target="_blank">Browse</a>
+        <button class="btn btn-delete" onClick=${handleDelete}>Delete</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function Paginator({ page, perPage, total, onPage, onPerPage }) {
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const pages = [];
+  // Smart page list: first, last, current ±2, with ellipsis
+  let prev = 0;
+  for (const p of [1, page - 2, page - 1, page, page + 1, page + 2, totalPages]) {
+    if (p < 1 || p > totalPages || p <= prev) continue;
+    if (prev && p - prev > 1) pages.push('…');
+    pages.push(p);
+    prev = p;
+  }
+  return html`<div class="paginator">
+    <div class="paginator-info">${total} galleries · Page ${page} of ${totalPages}</div>
+    <div class="paginator-controls">
+      <select value=${perPage} onChange=${e => onPerPage(parseInt(e.target.value))} class="paginator-select">
+        <option value="12">12 / page</option>
+        <option value="24">24 / page</option>
+        <option value="36">36 / page</option>
+        <option value="48">48 / page</option>
+      </select>
+      <button class="paginator-btn" disabled=${page <= 1} onClick=${() => onPage(page - 1)}>‹</button>
+      ${pages.map(p => p === '…' ? html`<span class="paginator-dots">…</span>` : html`<button class="paginator-btn ${p === page ? 'active' : ''}" onClick=${() => onPage(p)}>${p}</button>`)}
+      <button class="paginator-btn" disabled=${page >= totalPages} onClick=${() => onPage(page + 1)}>›</button>
+    </div>
+  </div>`;
+}
+
+function GalleryLibrary({ galleries, search, total, page, perPage, onSearch, onPage, onPerPage }) {
+  const filtered = search ? galleries.filter(g => String(g.gid).includes(search) || (g.title || '').toLowerCase().includes(search.toLowerCase())) : galleries;
+  const gridRef = useRef(null);
+  // Sync filler heights to match real cards
+  useEffect(() => {
+    if (!gridRef.current) return;
+    const cards = gridRef.current.querySelectorAll('.gallery-card:not(.gallery-card--filler)');
+    const fillers = gridRef.current.querySelectorAll('.gallery-card--filler');
+    if (!cards.length || !fillers.length) return;
+    let maxH = 0;
+    cards.forEach(el => { const h = el.offsetHeight; if (h > maxH) maxH = h; });
+    fillers.forEach(el => { el.style.height = maxH + 'px'; });
+  });
+  if (total === 0) return html`<div class="section"><div class="section-header"><span class="section-title">Gallery Library</span></div><div class="empty"><div class="empty-icon">○</div><div class="empty-text">No galleries downloaded yet</div></div></div>`;
+  return html`<div class="section">
+    <div class="section-header"><span class="section-title">Gallery Library</span><span class="section-count">${total} Galleries</span></div>
+    <div class="search-wrap"><input type="text" placeholder="Search by GID or title…" value=${search} onInput=${e => onSearch(e.target.value)} /></div>
+    <div class="gallery-grid" ref=${gridRef}>${(filtered.length ? filtered : galleries).map(g => html`<${GalleryCard} g=${g} />`)}
+    ${total > perPage ? Array.from({ length: perPage - galleries.length }, (_, i) => html`<div class="gallery-card gallery-card--filler"></div>`) : ''}</div>
+    <${Paginator} page=${page} perPage=${perPage} total=${total} onPage=${onPage} onPerPage=${onPerPage} />
+  </div>`;
+}
+
+function ActivityLog({ failed, onRetry }) {
+  if (failed.length === 0) return html`<div class="section"><div class="section-header"><span class="section-title">Activity Log</span></div><div class="empty"><div class="empty-icon">○</div><div class="empty-text">No failures</div></div></div>`;
+  return html`<div class="section">
+    <div class="section-header"><span class="section-title">Activity Log</span><span class="section-count">${failed.length} failure${failed.length !== 1 ? 's' : ''}</span></div>
+    <div class="log">${failed.slice().reverse().map(j => html`<div class="log-entry">
+      <span class="log-time">${j.failedAt ? new Date(j.failedAt).toLocaleString() : ''}</span>
+      <span class="log-gid">#${j.gid}</span>
+      <span class="log-msg error" style="flex:1">${j.error || 'Unknown'}</span>
+      <button class="btn btn-retry" onClick=${() => onRetry(j.gid, j.galleryUrl)}>↻ Retry</button>
+    </div>`)}</div>
+  </div>`;
+}
+
+function App() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(12);
+  const [total, setTotal] = useState(0);
+  const [dlUrl, setDlUrl] = useState(null);
+  const [dlStatus, setDlStatus] = useState(null);
+  const [dlLoading, setDlLoading] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState({ ipb_member_id: '', ipb_pass_hash: '', igneous: '' });
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [tick, setTick] = useState(0);
+
+  const anyModalOpen = dlStatus !== null || dlUrl !== null || showSettings;
+  useEffect(() => {
+    if (anyModalOpen) {
+      const sw = window.innerWidth - document.documentElement.clientWidth;
+      document.body.style.overflow = 'hidden';
+      document.body.style.paddingRight = sw + 'px';
+    } else {
+      document.body.style.overflow = '';
+      document.body.style.paddingRight = '';
+    }
+    return () => { document.body.style.overflow = ''; document.body.style.paddingRight = ''; };
+  }, [anyModalOpen]);
+  const closeOverlay = (setter) => (e) => { if (e.target.classList.contains('modal-overlay')) setter(null); };
+
+  // Load settings on mount
+  useEffect(() => {
+    fetch(API_BASE + '/settings').then(r => r.json()).then(d => {
+      if (d && typeof d === 'object') setSettings({ ipb_member_id: d.ipb_member_id || '', ipb_pass_hash: d.ipb_pass_hash || '', igneous: d.igneous || '' });
+    }).catch(() => {});
+  }, []);
+
+  const saveSettings = async () => {
+    setSettingsLoading(true);
+    try {
+      await fetch(API_BASE + '/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings) });
+      setShowSettings(false); toast('Settings saved');
+    } catch (e) { toast('Save failed: ' + e.message); }
+    finally { setSettingsLoading(false); }
+  };
+
+  const showDlModal = (url) => { setDlUrl(typeof url === 'string' ? url : ''); setDlStatus(null); };
+  const retryDl = async (gid, galleryUrl) => {
+    if (!galleryUrl) { toast('No gallery URL for retry'); return; }
+    showDlModal(galleryUrl);
+  };
+  const startDl = async () => {
+    const url = (dlUrl || '').trim(); if (!url) return;
+    const match = url.match(/https?:\/\/(?:e-hentai|exhentai)\.org\/g\/(\d+)\/([^\/]+)/);
+    if (!match) { setDlStatus({ success: false, title: 'Invalid URL', msg: 'URL must be like https://e-hentai.org/g/3939724/5d11cabac4/' }); return; }
+    const gid = match[1]; const galleryUrl = url.replace(/\/?(\?.*)?$/, '/');
+    setDlLoading(true);
+    try {
+      const r = await fetch(API_BASE + '/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gid, galleryUrl, dltype: 'res' }) });
+      const data = await r.json(); const s = data.status || 'error'; const p = data.progress ?? 0; const e = data.error || ''; const m = data.message || '';
+      let title, body;
+      if (s === 'completed') { title = 'Already Downloaded'; body = 'GID ' + gid + ' was already downloaded.'; }
+      else if (s === 'downloading') { title = 'Already Downloading'; body = 'GID ' + gid + ' is downloading (' + p + '%). ' + m; }
+      else if (s === 'queued') { title = 'Queued'; body = 'GID ' + gid + ' added to queue.'; }
+      else if (s === 'archiver_access' || s === 'extracting') { title = 'In Progress'; body = 'GID ' + gid + ' is ' + s + '. ' + m; }
+      else if (s === 'error') { title = 'Failed'; body = e || 'Unknown error'; }
+      else { title = 'Submitted'; body = 'GID ' + gid + ': ' + s; }
+      setDlStatus({ success: s !== 'error', title, msg: body });
+      if (s !== 'error') { setDlUrl(null); load(); }
+    } catch (e) { setDlStatus({ success: false, title: 'Network Error', msg: e.message }); }
+    finally { setDlLoading(false); }
+  };
+
+  const load = async () => {
+    try { const r = await fetch(API_BASE + '/dashboard?page=' + page + '&perPage=' + perPage); const d = await r.json(); setData(d); setTotal(d.total || 0); setError(null); } catch (e) { setError(e.message); }
+  };
+
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  window._reload = load;
+  useEffect(() => { load(); }, [page, perPage]);
+  useEffect(() => { const id = setInterval(() => loadRef.current(), 5000); return () => clearInterval(id); }, []);
+  useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 1000); return () => clearInterval(id); }, []);
+
+  if (error) {
+    return html`<div class="app"><div class="header"><h1>Cache Server</h1><div class="header-actions"><button class="refresh-btn" onClick=${load}>↻ RETRY</button></div></div><div class="empty"><div class="empty-icon">⚠</div><div class="empty-text">Failed to connect: ${error}</div></div></div>`;
+  }
+  if (!data) {
+    return html`<div class="app"><div class="loading"><div class="loading-dot"></div><div class="loading-dot"></div><div class="loading-dot"></div></div></div>`;
+  }
+
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'system');
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === 'system') root.removeAttribute('data-theme');
+    else root.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+  const nextTheme = { light: 'dark', dark: 'system', system: 'light' };
+  const themeIcon = { light: '☀️', dark: '🌙', system: '🖥' };
+
+  const { queued, completed, failed, system } = data;
+  const diskFree = system?.diskFree || 0;
+  const diskUsed = system?.diskUsed || 0;
+
+  return html`<div class="app">
+    <div class="header">
+      <h1>Cache Server</h1>
+      <div class="header-actions">
+        <button class="refresh-btn" onClick=${() => showDlModal()}><span class="btn-label-wide">+ DOWNLOAD</span><span class="btn-label-narrow">+</span></button>
+        <button class="refresh-btn refresh-btn--with-time" onClick=${load}><span class="btn-label-wide">↻ REFRESH</span><span class="btn-label-narrow">↻</span><span class="refresh-time"> · just now</span></button>
+        <div class="header-divider"></div>
+        <button class="theme-btn" onClick=${() => setTheme(nextTheme[theme])} title="Theme: ${theme}">${themeIcon[theme]}</button>
+        <button class="theme-btn" onClick=${() => setShowSettings(true)} title="Settings">⚙</button>
+      </div>
+    </div>
+    <${Metrics} active=${queued.length} done=${completed.length} failed=${failed.length} diskUsed=${diskUsed} diskFree=${diskFree} />
+    <${ActiveDownloads} jobs=${queued} />
+    <${GalleryLibrary} galleries=${completed} total=${total} page=${page} perPage=${perPage} search=${search} onSearch=${setSearch} onPage=${p => { setPage(p); }} onPerPage=${n => { setPerPage(n); setPage(1); }} />
+    <${ActivityLog} failed=${failed} onRetry=${retryDl} />
+
+    <div class="modal-overlay ${dlStatus !== null ? 'active' : ''}" onClick=${closeOverlay(() => setDlStatus(null))}>
+      <div class="modal">
+        <h3>${dlStatus ? (dlStatus.success ? '✅' : '❌') : ''} ${dlStatus?.title || ''}</h3>
+        <p>${dlStatus?.msg || ''}</p>
+        <div class="modal-actions">
+          <button class="btn btn-primary" onClick=${() => setDlStatus(null)}>OK</button>
+        </div>
       </div>
     </div>
 
-    <!-- Queue / In Progress -->
-    <div class="card">
-      <h2>⬇ Download Queue</h2>
-      ${queued.length === 0 ? '<div class="empty">No active downloads</div>' : `
-      <table>
-        <tr><th>GID</th><th>Status</th><th>Progress</th><th>Message</th></tr>
-        ${queued.map(j => {
-          const pct = j.progress || 0;
-          const badgeCls = j.status === 'downloading' ? 'badge-warn' : j.status === 'extracting' ? 'badge-info' : 'badge-info';
-          return `<tr>
-            <td><a class="gallery-link" href="/api/browse?gid=${j.gid}" target="_blank">${j.gid}</a></td>
-            <td><span class="badge ${badgeCls}">${j.status}</span></td>
-            <td>
-              <div style="display:flex;align-items:center;gap:8px">
-                <div style="flex:1"><div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div></div>
-                <span style="font-size:0.75rem;color:var(--muted)">${pct}%</span>
-              </div>
-            </td>
-            <td style="color:var(--muted);font-size:0.8rem">${j.message || ''}</td>
-          </tr>`;
-        }).join('')}
-      </table>`}
+    <div class="modal-overlay ${dlUrl !== null ? 'active' : ''}" onClick=${closeOverlay(() => { setDlUrl(null); setDlStatus(null); })}>
+      <div class="modal">
+        <h3>Quick Download</h3>
+        <p>Paste an E-Hentai or ExHentai gallery URL:</p>
+        <input class="dl-input" value=${dlUrl ?? ''} onInput=${e => setDlUrl(e.target.value)}
+          placeholder="https://e-hentai.org/g/3939724/5d11cabac4/" disabled=${dlLoading} />
+        ${dlLoading ? html`<p style="font-size:.8rem;color:var(--muted);margin-top:8px">Submitting…</p>` : ''}
+        <div class="modal-actions" style="margin-top:16px">
+          <button class="btn" onClick=${() => { setDlUrl(null); setDlStatus(null) }} disabled=${dlLoading}>Cancel</button>
+          <button class="btn btn-primary" onClick=${startDl} disabled=${dlLoading || !(dlUrl || '').trim()}>Start Download</button>
+        </div>
+      </div>
     </div>
 
-    <!-- Completed Galleries -->
-    <div class="card">
-      <h2>✅ Downloaded Galleries</h2>
-      ${completed.length === 0 ? '<div class="empty">No galleries downloaded yet</div>' : `
-      <div style="overflow-x:auto">
-      <table>
-        <tr><th>GID</th><th>Title</th><th>Images</th><th>Size</th><th>Downloaded</th><th></th></tr>
-        ${completed.map(g => {
-          const size = g.size ? (g.size / 1024 / 1024).toFixed(0) + ' MB' : 'N/A';
-          const date = g.downloadedAt ? new Date(g.downloadedAt).toLocaleString() : '';
-          return `<tr>
-            <td><a class="gallery-link" href="/api/browse?gid=${g.gid}" target="_blank">${g.gid}</a></td>
-            <td><span class="title-text" title="${g.title || ''}">${g.title || '-'}</span></td>
-            <td>${g.totalImages || '?'}</td>
-            <td>${size}</td>
-            <td style="font-size:0.75rem;color:var(--muted)">${date}</td>
-            <td class="actions">
-              <button class="btn-sm btn-del" onclick="deleteGallery(${g.gid})">🗑</button>
-            </td>
-          </tr>`;
-        }).join('')}
-      </table>
-      </div>`}
+    <div class="modal-overlay ${showSettings ? 'active' : ''}" onClick=${closeOverlay(() => setShowSettings(false))}>
+      <div class="modal">
+        <h3>⚙ Default Credentials</h3>
+        <p style="font-size:.8rem;margin-bottom:16px">These values are used when the client doesn't send its own cookies. Client values take priority.</p>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <label style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em">ipb_member_id</label>
+          <input class="dl-input" value=${settings.ipb_member_id} onInput=${e => setSettings(s => ({...s, ipb_member_id: e.target.value}))} placeholder="e.g. 1234567" disabled=${settingsLoading} />
+          <label style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:4px">ipb_pass_hash</label>
+          <input class="dl-input" value=${settings.ipb_pass_hash} onInput=${e => setSettings(s => ({...s, ipb_pass_hash: e.target.value}))} placeholder="e.g. abcdef1234567890abcdef1234567890" disabled=${settingsLoading} type="password" />
+          <label style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:4px">igneous</label>
+          <input class="dl-input" value=${settings.igneous} onInput=${e => setSettings(s => ({...s, igneous: e.target.value}))} placeholder="e.g. abcdef123" disabled=${settingsLoading} />
+        </div>
+        ${settingsLoading ? html`<p style="font-size:.8rem;color:var(--muted);margin-top:12px">Saving…</p>` : ''}
+        <div class="modal-actions" style="margin-top:20px">
+          <button class="btn" onClick=${() => setShowSettings(false)} disabled=${settingsLoading}>Cancel</button>
+          <button class="btn btn-primary" onClick=${saveSettings} disabled=${settingsLoading}>Save</button>
+        </div>
+      </div>
     </div>
-
-    <!-- Failed -->
-    <div class="card">
-      <h2>❌ Failed Downloads</h2>
-      ${failed.length === 0 ? '<div class="empty">No failures</div>' : `
-      <table>
-        <tr><th>GID</th><th>Error</th><th>Time</th></tr>
-        ${failed.map(j => `
-          <tr>
-            <td>${j.gid}</td>
-            <td style="color:var(--red);font-size:0.8rem">${j.error || 'Unknown'}</td>
-            <td style="font-size:0.75rem;color:var(--muted)">${j.failedAt ? new Date(j.failedAt).toLocaleString() : ''}</td>
-          </tr>`).join('')}
-      </table>`}
-    </div>
-  `;
+  </div>`;
 }
 
-async function deleteGallery(gid) {
-  if (!confirm(`Delete gallery ${gid}?`)) return;
-  try {
-    await fetch('/api/delete?gid=' + gid, { method: 'POST' });
-    load();
-  } catch (err) {
-    alert('Delete failed: ' + err.message);
-  }
-}
 
-load();
-setInterval(load, 5000);
+render(html`<${App} />`, document.getElementById('app'));
 </script>
 </body>
 </html>

@@ -3,6 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { URL } = require('url');
 const express = require('express');
 const store = require('./store');
@@ -287,6 +288,18 @@ function shouldCache(url, statusCode, contentType) {
   return false;
 }
 
+// Detect known error pages (ban, captcha, etc.) so we don't cache them
+function isErrorPage(data, contentType, contentEncoding) {
+  if (!contentType || !contentType.startsWith('text/html') || !data || data.length < 50) return false;
+  try {
+    let raw = data;
+    if (contentEncoding && contentEncoding.includes('gzip')) raw = zlib.gunzipSync(data);
+    if (contentEncoding && contentEncoding.includes('deflate')) raw = zlib.inflateSync(data);
+    const snippet = raw.toString('utf8').slice(0, 500);
+    return /temporarily banned|excessive request rate|IP banned|please wait|bounce_login|captcha/i.test(snippet);
+  } catch { return false; }
+}
+
 function getContentType(headers) {
   const ct = headers['content-type'];
   return Array.isArray(ct) ? ct[0] : ct;
@@ -314,7 +327,7 @@ app.get('/api/dashboard', (req, res) => {
     .filter(j => ['queued', 'downloading', 'archiver_access', 'extracting'].includes(j.status))
     .map(j => ({ gid: j.gid, status: j.status, progress: j.progress || 0, message: j.message || '' }));
 
-  const completed = galleries
+  const completedAll = galleries
     .filter(g => g.status === 'completed')
     .map(g => ({
       gid: g.gid,
@@ -324,20 +337,60 @@ app.get('/api/dashboard', (req, res) => {
       downloadedAt: g.updatedAt,
     }));
 
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const perPage = Math.min(100, Math.max(5, parseInt(req.query.perPage) || 20));
+  const total = completedAll.length;
+  const start = (page - 1) * perPage;
+  const completed = completedAll.slice(start, start + perPage);
+
   const failed = jobs
     .filter(j => j.status === 'error')
-    .map(j => ({ gid: j.gid, error: j.error || 'Unknown', failedAt: j.updatedAt }));
+    .map(j => ({ gid: j.gid, error: j.error || 'Unknown', galleryUrl: j.galleryUrl || '', dltype: j.dltype || 'res', failedAt: j.updatedAt }));
 
   const disk = store.getDiskUsage();
 
-  res.json({ queued, completed, failed, system: { diskUsed: disk.used, diskFree: disk.free } });
+  res.json({ queued, completed, total, page, perPage, hasNext: start + perPage < total, failed, system: { diskUsed: disk.used, diskFree: disk.free } });
 });
 
-// Download trigger — passes client cookies to the archiver flow
+// ── Settings persistence ──
+const SETTINGS_PATH = path.join(CACHE_DIR, 'settings.json');
+function loadSettings() {
+  try { return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8')); } catch { return {}; }
+}
+function saveSettings(s) {
+  try { fs.writeFileSync(SETTINGS_PATH, JSON.stringify(s, null, 2)); } catch {}
+}
+
+// Settings API
+app.get('/api/settings', (req, res) => res.json(loadSettings()));
+app.put('/api/settings', (req, res) => {
+  const body = req.body || {};
+  const current = loadSettings();
+  if (body.ipb_member_id !== undefined) current.ipb_member_id = body.ipb_member_id;
+  if (body.ipb_pass_hash !== undefined) current.ipb_pass_hash = body.ipb_pass_hash;
+  if (body.igneous !== undefined) current.igneous = body.igneous;
+  saveSettings(current);
+  res.json({ success: true });
+});
+
+// Build cookie string from settings
+function buildDefaultCookies() {
+  const s = loadSettings();
+  const parts = [];
+  if (s.ipb_member_id) parts.push(`ipb_member_id=${s.ipb_member_id}`);
+  if (s.ipb_pass_hash) parts.push(`ipb_pass_hash=${s.ipb_pass_hash}`);
+  if (s.igneous) parts.push(`igneous=${s.igneous}`);
+  return parts.join('; ');
+}
+
+// Download trigger — merges client cookies with server defaults
 app.post('/api/download', (req, res) => {
   const { gid, galleryUrl, dltype } = req.body || {};
   if (!gid || !galleryUrl) return res.status(400).json({ error: 'gid and galleryUrl required' });
-  const cookies = req.headers.cookie || '';
+  const clientCookies = req.headers.cookie || '';
+  const defaultCookies = buildDefaultCookies();
+  // Merge: client cookies override defaults
+  const cookies = clientCookies ? clientCookies + '; ' + defaultCookies : defaultCookies;
   const result = downloader.enqueue(gid, galleryUrl, dltype || 'res', cookies);
   res.json(result);
 });
@@ -367,7 +420,7 @@ app.get('/api/browse', (req, res) => {
   let files = [];
   try {
     files = fs.readdirSync(dir)
-      .filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f))
+      .filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f) && !f.startsWith('cover.'))
       .sort((a, b) => {
         const na = parseInt(a.match(/(\d+)/)?.[1] || '0', 10);
         const nb = parseInt(b.match(/(\d+)/)?.[1] || '0', 10);
@@ -402,6 +455,28 @@ app.post('/api/delete', (req, res) => {
   store.deleteJob(gid);
   res.json({ status: 'deleted', gid });
   console.log(`[api] Deleted gallery ${gid}`);
+});
+
+// List downloaded galleries (paginated, newest first)
+app.get('/api/downloaded', (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page || '1', 10));
+  const perPage = 20;
+  const all = store.listGalleries().filter(g => g.status === 'completed');
+  const total = all.length;
+  const start = (page - 1) * perPage;
+  const paged = all.slice(start, start + perPage);
+  res.json({
+    list: paged.map(g => ({
+      gid: g.gid,
+      title: g.title || '',
+      url: (g.galleryPath || `/g/${g.gid}/`) + '?nw=always',
+      totalImages: g.totalImages || 0,
+      downloadedAt: g.updatedAt,
+    })),
+    total,
+    hasNext: start + perPage < total,
+    page,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -449,8 +524,15 @@ app.all('/proxy/{*path}', async (req, res) => {
 
     const ct = getContentType(proxyRes.headers);
     if (shouldCache(originalUrl, proxyRes.statusCode, ct)) {
-      setCache(originalUrl, proxyRes.statusCode, proxyRes.headers, proxyRes.data);
-      console.log(`[${cached ? 'STALE' : 'MISS'}] ${method} ${proxyRes.statusCode} ${originalUrl} (${elapsed}ms) [cached]`);
+      // Don't cache known error/ban pages
+      const ce = Array.isArray(proxyRes.headers['content-encoding'])
+        ? proxyRes.headers['content-encoding'].join(', ') : proxyRes.headers['content-encoding'];
+      if (isErrorPage(proxyRes.data, ct, ce)) {
+        console.log(`[BAN] ${method} ${proxyRes.statusCode} ${originalUrl} (${elapsed}ms) [ban detected, not cached]`);
+      } else {
+        setCache(originalUrl, proxyRes.statusCode, proxyRes.headers, proxyRes.data);
+        console.log(`[${cached ? 'STALE' : 'MISS'}] ${method} ${proxyRes.statusCode} ${originalUrl} (${elapsed}ms) [cached]`);
+      }
     } else {
       console.log(`[PAS] ${method} ${proxyRes.statusCode} ${originalUrl} (${elapsed}ms)`);
     }

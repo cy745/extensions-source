@@ -175,6 +175,26 @@ async function hathAccess(hathUrl, cookies) {
   return hathUrl.includes('?') ? `${hathUrl}&start=1` : `${hathUrl}?start=1`;
 }
 
+// Fetch gallery page metadata (title, thumbnail) via regex parsing
+async function fetchGalleryMetadata(galleryUrl) {
+  try {
+    const { res } = await httpRequest('GET', galleryUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      timeout: 15000,
+    });
+    const html = (await collectBody(res)).toString('utf8');
+
+    const title = html.match(/<h1[^>]*id="gn"[^>]*>([\s\S]*?)<\/h1>/)?.[1]?.replace(/<[^>]+>/g, '').trim() || '';
+    const thumbMatch = html.match(/<div[^>]*id="gd1"[^>]*>[\s\S]*?<div[^>]*style="[^"]*url\(([^)]+)\)/);
+    const thumbnailUrl = thumbMatch?.[1] || '';
+
+    return { title, thumbnailUrl };
+  } catch (err) {
+    console.log(`[dl] fetchGalleryMetadata error: ${err.message}`);
+    return null;
+  }
+}
+
 // Stream download ZIP file with progress
 function downloadZip(downloadUrl, cookies, outputPath, onProgress) {
   return new Promise((resolve, reject) => {
@@ -332,7 +352,8 @@ function cleanupArchive(archivePath, gid) {
 // Queue management
 // ---------------------------------------------------------------------------
 
-let currentJob = null;
+const MAX_CONCURRENT = 2;
+const activeJobs = new Map(); // gid → job
 let queue = [];
 
 function enqueue(gid, galleryUrl, dltype, cookies) {
@@ -343,7 +364,7 @@ function enqueue(gid, galleryUrl, dltype, cookies) {
   }
 
   // Check if currently being downloaded
-  if (currentJob && currentJob.gid === gid) {
+  if (activeJobs.has(gid)) {
     const job = store.getJob(gid);
     return { status: job?.status || 'downloading', gid, progress: job?.progress || 0, message: job?.message || '' };
   }
@@ -368,9 +389,11 @@ function enqueue(gid, galleryUrl, dltype, cookies) {
 }
 
 function processQueue() {
-  if (currentJob || queue.length === 0) return;
-  currentJob = queue.shift();
-  executeJob(currentJob);
+  while (activeJobs.size < MAX_CONCURRENT && queue.length > 0) {
+    const job = queue.shift();
+    activeJobs.set(job.gid, job);
+    executeJob(job);
+  }
 }
 
 async function executeJob(job) {
@@ -410,21 +433,51 @@ async function executeJob(job) {
     store.setJob(gid, { status: 'extracting', progress: 98, message: 'Finalizing...' });
     cleanupArchive(archivePath, gid);
 
+    // Step 7: Fetch gallery metadata + thumbnail and save alongside images
+    const meta = await fetchGalleryMetadata(galleryUrl);
+    if (meta) {
+      try {
+        const metaPath = path.join(extractDir, 'metadata.json');
+        fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+        if (meta.thumbnailUrl) {
+          try {
+            const { res: imgRes } = await httpRequest('GET', meta.thumbnailUrl, {
+              headers: { 'User-Agent': 'Mozilla/5.0' },
+              timeout: 15000,
+            });
+            const imgData = await collectBody(imgRes);
+            const thumbExt = path.extname(new URL(meta.thumbnailUrl).pathname) || '.jpg';
+            fs.writeFileSync(path.join(extractDir, `cover${thumbExt}`), imgData);
+          } catch (err) {
+            console.log(`[dl] ${gid}: cover download failed: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        console.log(`[dl] ${gid}: metadata save failed: ${err.message}`);
+      }
+    }
+
+    // Extract gallery path from galleryUrl (e.g. /g/123/token/) for manga URL matching
+    let galleryPath = '';
+    try { galleryPath = new URL(galleryUrl).pathname; } catch {}
+
     // Done
+    const finalSize = store.getGallerySize(gid);
     store.setGallery(gid, {
       status: 'completed',
-      title: '',
+      title: meta?.title || '',
+      galleryPath,
       totalImages: fileCount,
-      size: store.getGallerySize(gid),
+      size: finalSize,
     });
     store.deleteJob(gid);
-    console.log(`[dl] Gallery ${gid} complete — ${fileCount} files`);
+    console.log(`[dl] Gallery ${gid} complete — ${fileCount} files${meta?.title ? ', title: ' + meta.title : ''}`);
 
   } catch (err) {
     console.error(`[dl] Error for gid=${gid}: ${err.message}`);
     store.setJob(gid, { status: 'error', error: err.message });
   } finally {
-    currentJob = null;
+    activeJobs.delete(gid);
     processQueue();
   }
 }
@@ -445,7 +498,7 @@ function getStatus(gid) {
 
 function getQueueInfo() {
   return {
-    current: currentJob ? { gid: currentJob.gid, status: store.getJob(currentJob.gid)?.status || 'processing' } : null,
+    active: Array.from(activeJobs.keys()).map(gid => ({ gid, status: store.getJob(gid)?.status || 'processing' })),
     queued: queue.map(j => ({ gid: j.gid, status: 'queued' })),
   };
 }
