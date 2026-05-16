@@ -78,6 +78,9 @@ abstract class EHentai(
     // Action tags — store gallery path so tag search can reconstruct full URL
     private val gidToGalleryPath = ConcurrentHashMap<String, String>()
 
+    // Track refresh timing for double-refresh download trigger
+    private var lastRefreshTime = 0L
+
     // true if lang is a "natural human language"
     private fun isLangNatural(): Boolean = lang !in listOf("none", "other")
 
@@ -486,7 +489,6 @@ abstract class EHentai(
 
             // Add action tags if cache server is configured
             val rawUrl = url ?: ""
-            // Strip /proxy prefix when going through cache server
             val cleanUrl = rawUrl.removePrefix("/proxy")
             val gid = cleanUrl.split("/").getOrNull(2) ?: ""
             if (gid.isNotEmpty()) {
@@ -504,6 +506,18 @@ abstract class EHentai(
                 if (getCacheServerUrlPref().isNotBlank() && gid.isNotEmpty()) {
                     val extras = "⚡dl:$gid, ⚡st:$gid"
                     genre = if (genre.isNullOrBlank()) extras else "$genre, $extras"
+                    // Double-refresh within 500ms → trigger download
+                    val now = System.currentTimeMillis()
+                    if (lastRefreshTime > 0 && now - lastRefreshTime < 500) {
+                        val galleryUrl = "$baseUrl$cleanUrl"
+                        triggerDownload(gid, galleryUrl)
+                    }
+                    lastRefreshTime = now
+                    // Fetch and show download status at top of description
+                    val statusText = fetchDownloadStatus(gid)
+                    if (statusText.isNotEmpty()) {
+                        description = "$statusText\n\n${description.orEmpty()}"
+                    }
                 }
             }
         }
@@ -549,7 +563,18 @@ abstract class EHentai(
                     val body = resp.body?.string() ?: "{}"
                     val json = org.json.JSONObject(body)
                     val status = json.optString("status", "error")
-                    resultMessage = if (status == "queued" || status == "already_queued") "✅ 下载已提交" else "❌ 下载失败"
+                    val progress = json.optInt("progress", 0)
+                    val error = json.optString("error", "")
+                    val message = json.optString("message", "")
+                    resultMessage = when (status) {
+                        "completed" -> "✅ 下载完成"
+                        "downloading" -> "⬇ 下载中 $progress%"
+                        "archiver_access" -> "🔄 连接存档中"
+                        "extracting" -> "📦 解压中"
+                        "queued" -> "⏳ 排队中"
+                        "error" -> "❌ $error"
+                        else -> "❓ $status"
+                    }
                 } catch (e: Exception) {
                     resultMessage = "❌ 网络错误"
                 }
@@ -589,6 +614,56 @@ abstract class EHentai(
             thumbnail_url = "${MenuActions.INTENT_PREFIX}$ACTION_RESULT/$gid"
         }
         return MangasPage(listOf(fakeManga), false)
+    }
+
+    // Trigger download via cache server API (synchronous, called from mangaDetailsParse)
+    private fun triggerDownload(gid: String, galleryUrl: String) {
+        try {
+            val cacheUrl = getCacheServerUrlPref()
+            val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+            val jsonBody = """{"gid":"$gid","galleryUrl":"$galleryUrl","dltype":"res"}"""
+            val request = Request.Builder()
+                .url("$apiBase/api/download")
+                .addHeader("Content-Type", "application/json")
+                .post(jsonBody.toRequestBody("application/json".toMediaType()))
+                .build()
+            client.newCall(request).execute()
+        } catch (_: Exception) {}
+    }
+
+    // Fetch download status text for description header
+    private fun fetchDownloadStatus(gid: String): String {
+        return try {
+            val cacheUrl = getCacheServerUrlPref()
+            val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+            val request = GET("$apiBase/api/status?gid=$gid")
+            val resp = client.newCall(request).execute()
+            val body = resp.body?.string() ?: return ""
+            val json = org.json.JSONObject(body)
+            val status = json.optString("status", "idle")
+            val progress = json.optInt("progress", 0)
+            val error = json.optString("error", "")
+            val sizeBytes = json.optLong("size", 0)
+            when (status) {
+                "completed" -> {
+                    val sizeStr = if (sizeBytes > 0) {
+                        val mb = sizeBytes / (1024.0 * 1024.0)
+                        if (mb > 1024) "%.1f GiB".format(mb / 1024.0) else "%.0f MiB".format(mb)
+                    } else {
+                        ""
+                    }
+                    if (sizeStr.isNotEmpty()) "✅ 下载完成 ($sizeStr)" else "✅ 下载完成"
+                }
+                "downloading" -> "⬇ 下载中 $progress%"
+                "archiver_access" -> "🔄 连接存档中"
+                "extracting" -> "📦 解压中"
+                "queued" -> "⏳ 排队中"
+                "error" -> "❌ $error"
+                else -> "⏸ 未下载" // idle or unknown
+            }
+        } catch (_: Exception) {
+            ""
+        }
     }
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = when {

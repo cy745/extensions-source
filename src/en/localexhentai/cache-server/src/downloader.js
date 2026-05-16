@@ -336,8 +336,27 @@ let currentJob = null;
 let queue = [];
 
 function enqueue(gid, galleryUrl, dltype, cookies) {
-  if (queue.some(j => j.gid === gid) || (currentJob && currentJob.gid === gid)) {
-    return { status: 'already_queued', gid };
+  // Check if already completed
+  const gallery = store.getGallery(gid);
+  if (gallery && gallery.status === 'completed') {
+    return { status: 'completed', gid, progress: 100, message: 'Already downloaded' };
+  }
+
+  // Check if currently being downloaded
+  if (currentJob && currentJob.gid === gid) {
+    const job = store.getJob(gid);
+    return { status: job?.status || 'downloading', gid, progress: job?.progress || 0, message: job?.message || '' };
+  }
+
+  // Check if already queued
+  if (queue.some(j => j.gid === gid)) {
+    return { status: 'queued', gid, progress: 0, message: 'Waiting in queue' };
+  }
+
+  // Check if in error state — allow re-queue
+  const existingJob = store.getJob(gid);
+  if (existingJob && existingJob.status === 'error') {
+    store.deleteJob(gid);
   }
 
   const job = { gid, galleryUrl, dltype: dltype || 'res', cookies: cookies || '', status: 'queued', progress: 0, createdAt: new Date().toISOString() };
@@ -345,7 +364,7 @@ function enqueue(gid, galleryUrl, dltype, cookies) {
   store.setJob(gid, { status: 'queued', progress: 0, galleryUrl, dltype: dltype || 'res' });
 
   processQueue();
-  return { status: 'queued', gid };
+  return { status: 'queued', gid, progress: 0, message: 'Queued for download' };
 }
 
 function processQueue() {

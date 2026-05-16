@@ -12,7 +12,9 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const UPSTREAM_HOST = process.env.UPSTREAM_HOST || 'https://e-hentai.org';
 const CACHE_DIR = process.env.CACHE_DIR || '/app/cache';
 const GALLERIES_DIR = path.join(CACHE_DIR, 'galleries');
-const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL_MS || String(7 * 24 * 60 * 60 * 1000), 10); // 7 days default
+const CACHE_FILES_DIR = path.join(CACHE_DIR, 'cache');
+const CACHE_TTL_IMAGE_MS = parseInt(process.env.CACHE_TTL_IMAGE_MS || String(7 * 24 * 60 * 60 * 1000), 10); // 7 days
+const CACHE_TTL_HTML_MS = parseInt(process.env.CACHE_TTL_HTML_MS || String(60 * 60 * 1000), 10); // 1 hour
 
 // Patch console to include ISO timestamps
 ['log','warn','error'].forEach(m => {
@@ -20,8 +22,10 @@ const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL_MS || String(7 * 24 * 60 * 6
   console[m] = (...args) => orig.apply(console, [new Date().toISOString(), ...args]);
 });
 
-// Ensure cache directory exists
-try { fs.mkdirSync(CACHE_DIR, { recursive: true }); } catch {}
+// Ensure directories exist
+[CACHE_DIR, CACHE_FILES_DIR, GALLERIES_DIR].forEach(d => {
+  try { fs.mkdirSync(d, { recursive: true }); } catch {}
+});
 
 // ---------------------------------------------------------------------------
 // DNS-over-HTTPS resolver – bypasses network-level DNS poisoning
@@ -98,8 +102,8 @@ function extFromContentType(ct) {
   return map[ct] || '';
 }
 
-function getCacheDataPath(key, ext) { return path.join(CACHE_DIR, `${key}${ext || '.data'}`); }
-function getCacheMetaPath(key) { return path.join(CACHE_DIR, `${key}.json`); }
+function getCacheDataPath(key, ext) { return path.join(CACHE_FILES_DIR, `${key}${ext || '.data'}`); }
+function getCacheMetaPath(key) { return path.join(CACHE_FILES_DIR, `${key}.json`); }
 
 function getCached(url) {
   const key = getCacheKey(url);
@@ -107,19 +111,13 @@ function getCached(url) {
   const meta = readMeta(metaPath);
   if (!meta) return null;
   const ext = extFromUrl(url) || extFromContentType(meta.contentType);
-  // Try extension-based path first, fall back to legacy .data
-  const dataPath = getCacheDataPath(key, ext);
-  const legacyPath = getCacheDataPath(key, '.data');
-  const actualPath = fs.existsSync(dataPath) ? dataPath : (fs.existsSync(legacyPath) ? legacyPath : null);
-  if (!actualPath) return null;
+  const dataPath = getCacheDataPath(key, ext || '.data');
+  if (!fs.existsSync(dataPath)) return null;
   try {
-    if (Date.now() - meta.timestamp > CACHE_TTL_MS) {
-      fs.unlinkSync(metaPath);
-      fs.unlinkSync(legacyPath);
-      try { fs.unlinkSync(dataPath); } catch {}
-      return null;
-    }
-    return { meta, data: fs.readFileSync(actualPath) };
+    const ttl = meta.ttl || CACHE_TTL_IMAGE_MS;
+    const expired = Date.now() - meta.timestamp > ttl;
+    const data = fs.readFileSync(dataPath);
+    return { meta, data, expired };
   } catch {
     return null;
   }
@@ -135,7 +133,8 @@ function setCache(url, statusCode, headers, data) {
   const key = getCacheKey(url);
   const ct = getContentType(headers) || '';
   const ext = extFromUrl(url) || extFromContentType(ct);
-  const meta = { url, statusCode, headers, contentType: ct, timestamp: Date.now() };
+  const ttl = cacheTtlFor(ct);
+  const meta = { url, statusCode, headers, contentType: ct, ttl, timestamp: Date.now() };
   try {
     fs.writeFileSync(getCacheMetaPath(key), JSON.stringify(meta));
     fs.writeFileSync(getCacheDataPath(key, ext), data);
@@ -275,10 +274,16 @@ function proxyRequest(originalUrl, method, headers, retries, redirectDepth = 5) 
 // Cache-control helpers – decide what is cacheable
 // ---------------------------------------------------------------------------
 
+function cacheTtlFor(contentType) {
+  if (!contentType) return CACHE_TTL_IMAGE_MS;
+  if (contentType.startsWith('image/')) return CACHE_TTL_IMAGE_MS;
+  if (contentType.startsWith('text/html')) return CACHE_TTL_HTML_MS;
+  return CACHE_TTL_IMAGE_MS;
+}
+
 function shouldCache(url, statusCode, contentType) {
   if (statusCode !== 200) return false;
-  // Only cache gallery pages, image pages, API-style requests
-  if (contentType && (contentType.startsWith('text/html') || contentType.startsWith('image/'))) return true;
+  if (contentType && (contentType.startsWith('image/') || contentType.startsWith('text/html'))) return true;
   return false;
 }
 
@@ -423,9 +428,9 @@ app.all('/proxy/{*path}', async (req, res) => {
 
   console.log(`[REQ] ${method} ${req.url} -> ${originalUrl}`);
 
-  // Check cache
+  // Check cache (stale-while-revalidate: expired entries are still served on error)
   const cached = getCached(originalUrl);
-  if (cached) {
+  if (cached && !cached.expired) {
     const elapsed = Date.now() - startTime;
     console.log(`[HIT ] ${method} ${originalUrl} (${elapsed}ms)`);
     res.writeHead(cached.meta.statusCode, {
@@ -445,24 +450,34 @@ app.all('/proxy/{*path}', async (req, res) => {
     const ct = getContentType(proxyRes.headers);
     if (shouldCache(originalUrl, proxyRes.statusCode, ct)) {
       setCache(originalUrl, proxyRes.statusCode, proxyRes.headers, proxyRes.data);
-      console.log(`[MISS] ${method} ${proxyRes.statusCode} ${originalUrl} (${elapsed}ms) [cached]`);
+      console.log(`[${cached ? 'STALE' : 'MISS'}] ${method} ${proxyRes.statusCode} ${originalUrl} (${elapsed}ms) [cached]`);
     } else {
       console.log(`[PAS] ${method} ${proxyRes.statusCode} ${originalUrl} (${elapsed}ms)`);
     }
 
     const responseHeaders = {
       ...proxyRes.headers,
-      'x-cache': proxyRes.statusCode === 200 && shouldCache(originalUrl, proxyRes.statusCode, ct) ? 'MISS' : 'BYPASS',
+      'x-cache': proxyRes.statusCode === 200 && shouldCache(originalUrl, proxyRes.statusCode, ct) ? (cached ? 'STALE' : 'MISS') : 'BYPASS',
     };
     delete responseHeaders['transfer-encoding'];
 
     res.writeHead(proxyRes.statusCode, responseHeaders);
     res.end(proxyRes.data);
   } catch (err) {
+    // If we have expired cache, serve it as fallback
+    if (cached && cached.expired) {
+      console.log(`[STALE] ${method} ${originalUrl} — upstream error, serving stale cache`);
+      res.writeHead(cached.meta.statusCode, {
+        ...cached.meta.headers,
+        'x-cache': 'STALE',
+        'x-cache-timestamp': new Date(cached.meta.timestamp).toISOString(),
+      });
+      res.end(cached.data);
+      return;
+    }
     const elapsed = Date.now() - startTime;
     console.error(`[ERR] ${method} ${originalUrl} (${elapsed}ms): ${err.message}`);
     const errBody = JSON.stringify({
-      error: 'Cache miss and upstream unreachable',
       originalUrl,
       message: err.message,
     });
@@ -479,6 +494,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[ehentai-cache-server] listening on port ${PORT}`);
   console.log(`[ehentai-cache-server] upstream: ${UPSTREAM_HOST}`);
   console.log(`[ehentai-cache-server] cache dir: ${CACHE_DIR}`);
-  console.log(`[ehentai-cache-server] cache TTL: ${CACHE_TTL_MS}ms`);
+  console.log(`[ehentai-cache-server] cache TTL: image=${CACHE_TTL_IMAGE_MS}ms html=${CACHE_TTL_HTML_MS}ms`);
   warmupDns();
 });
