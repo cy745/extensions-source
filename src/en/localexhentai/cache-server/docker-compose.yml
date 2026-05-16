@@ -1,0 +1,19 @@
+services:
+  ehentai-cache:
+    build: .
+    container_name: ehentai-cache
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - UPSTREAM_HOST=https://e-hentai.org
+      - CACHE_TTL_MS=604800000
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    volumes:
+      - cache-data:/app/cache
+    restart: unless-stopped
+
+volumes:
+  cache-data:

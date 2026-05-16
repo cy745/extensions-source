@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EH Cache Dashboard</title>
+<style>
+  :root { --bg: #1a1a2e; --card: #16213e; --accent: #e94560; --text: #eee; --muted: #889; --green: #2ecc71; --orange: #f39c12; --red: #e74c3c; --blue: #3498db; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 20px; }
+  h1 { font-size: 1.5rem; margin-bottom: 20px; color: var(--accent); }
+  h2 { font-size: 1.1rem; margin-bottom: 12px; color: var(--text); }
+  .grid { display: grid; grid-template-columns: 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; }
+  @media (min-width: 768px) { .grid { grid-template-columns: 1fr 1fr; } .full { grid-column: 1 / -1; } }
+  .card { background: var(--card); border-radius: 10px; padding: 16px; border: 1px solid #2a2a4a; }
+  .stat-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 120px; text-align: center; padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px; }
+  .stat .val { font-size: 1.4rem; font-weight: bold; }
+  .stat .lbl { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #2a2a4a; }
+  th { color: var(--muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.5px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 500; }
+  .badge-ok { background: rgba(46,204,113,0.2); color: var(--green); }
+  .badge-warn { background: rgba(243,156,18,0.2); color: var(--orange); }
+  .badge-err { background: rgba(231,76,60,0.2); color: var(--red); }
+  .badge-info { background: rgba(52,152,219,0.2); color: var(--blue); }
+  .progress { width: 100%; height: 6px; background: #2a2a4a; border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  .progress-bar { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.5s; }
+  .empty { text-align: center; color: var(--muted); padding: 24px; font-size: 0.9rem; }
+  .gallery-link { color: var(--blue); text-decoration: none; }
+  .gallery-link:hover { text-decoration: underline; }
+  .actions { display: flex; gap: 4px; }
+  .btn-sm { padding: 2px 8px; border: none; border-radius: 4px; cursor: pointer; font-size: 0.75rem; }
+  .btn-del { background: rgba(231,76,60,0.2); color: var(--red); }
+  .btn-del:hover { background: rgba(231,76,60,0.4); }
+  .refresh { float: right; font-size: 0.8rem; color: var(--muted); cursor: pointer; }
+  .refresh:hover { color: var(--text); }
+  .title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; display: inline-block; }
+  #sysInfo { display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+  .si-item { text-align: center; padding: 8px; }
+  .si-item .v { font-size: 1.1rem; font-weight: bold; }
+  .si-item .l { font-size: 0.7rem; color: var(--muted); }
+  .loading { text-align: center; padding: 40px; color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>📦 EH Cache Dashboard <span class="refresh" onclick="load()">↻ refresh</span></h1>
+<div class="grid" id="app">
+  <div class="loading card full">Loading...</div>
+</div>
+
+<script>
+async function load() {
+  const app = document.getElementById('app');
+  try {
+    const res = await fetch('/api/dashboard');
+    const data = await res.json();
+    app.innerHTML = render(data);
+  } catch (err) {
+    app.innerHTML = `<div class="card full" style="color:var(--red)">Failed to load: ${err.message}</div>`;
+  }
+}
+
+function render(data) {
+  const { queued, completed, failed, system } = data;
+  const totalActive = queued.length;
+  const totalDone = completed.length;
+  const totalFailed = failed.length;
+
+  return `
+    <!-- Stats -->
+    <div class="card full">
+      <div class="stat-row">
+        <div class="stat"><div class="val" style="color:var(--blue)">${totalActive}</div><div class="lbl">In Progress</div></div>
+        <div class="stat"><div class="val" style="color:var(--green)">${totalDone}</div><div class="lbl">Downloaded</div></div>
+        <div class="stat"><div class="val" style="color:var(--red)">${totalFailed}</div><div class="lbl">Failed</div></div>
+        <div class="stat"><div class="val" style="color:var(--text)">${system.diskUsed || 'N/A'}</div><div class="lbl">Disk Used</div></div>
+        <div class="stat"><div class="val" style="color:var(--text)">${system.diskFree || 'N/A'}</div><div class="lbl">Disk Free</div></div>
+      </div>
+    </div>
+
+    <!-- Queue / In Progress -->
+    <div class="card">
+      <h2>⬇ Download Queue</h2>
+      ${queued.length === 0 ? '<div class="empty">No active downloads</div>' : `
+      <table>
+        <tr><th>GID</th><th>Status</th><th>Progress</th><th>Message</th></tr>
+        ${queued.map(j => {
+          const pct = j.progress || 0;
+          const badgeCls = j.status === 'downloading' ? 'badge-warn' : j.status === 'extracting' ? 'badge-info' : 'badge-info';
+          return `<tr>
+            <td><a class="gallery-link" href="/api/browse?gid=${j.gid}" target="_blank">${j.gid}</a></td>
+            <td><span class="badge ${badgeCls}">${j.status}</span></td>
+            <td>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div style="flex:1"><div class="progress"><div class="progress-bar" style="width:${pct}%"></div></div></div>
+                <span style="font-size:0.75rem;color:var(--muted)">${pct}%</span>
+              </div>
+            </td>
+            <td style="color:var(--muted);font-size:0.8rem">${j.message || ''}</td>
+          </tr>`;
+        }).join('')}
+      </table>`}
+    </div>
+
+    <!-- Completed Galleries -->
+    <div class="card">
+      <h2>✅ Downloaded Galleries</h2>
+      ${completed.length === 0 ? '<div class="empty">No galleries downloaded yet</div>' : `
+      <div style="overflow-x:auto">
+      <table>
+        <tr><th>GID</th><th>Title</th><th>Images</th><th>Size</th><th>Downloaded</th><th></th></tr>
+        ${completed.map(g => {
+          const size = g.size ? (g.size / 1024 / 1024).toFixed(0) + ' MB' : 'N/A';
+          const date = g.downloadedAt ? new Date(g.downloadedAt).toLocaleString() : '';
+          return `<tr>
+            <td><a class="gallery-link" href="/api/browse?gid=${g.gid}" target="_blank">${g.gid}</a></td>
+            <td><span class="title-text" title="${g.title || ''}">${g.title || '-'}</span></td>
+            <td>${g.totalImages || '?'}</td>
+            <td>${size}</td>
+            <td style="font-size:0.75rem;color:var(--muted)">${date}</td>
+            <td class="actions">
+              <button class="btn-sm btn-del" onclick="deleteGallery(${g.gid})">🗑</button>
+            </td>
+          </tr>`;
+        }).join('')}
+      </table>
+      </div>`}
+    </div>
+
+    <!-- Failed -->
+    <div class="card">
+      <h2>❌ Failed Downloads</h2>
+      ${failed.length === 0 ? '<div class="empty">No failures</div>' : `
+      <table>
+        <tr><th>GID</th><th>Error</th><th>Time</th></tr>
+        ${failed.map(j => `
+          <tr>
+            <td>${j.gid}</td>
+            <td style="color:var(--red);font-size:0.8rem">${j.error || 'Unknown'}</td>
+            <td style="font-size:0.75rem;color:var(--muted)">${j.failedAt ? new Date(j.failedAt).toLocaleString() : ''}</td>
+          </tr>`).join('')}
+      </table>`}
+    </div>
+  `;
+}
+
+async function deleteGallery(gid) {
+  if (!confirm(`Delete gallery ${gid}?`)) return;
+  try {
+    await fetch('/api/delete?gid=' + gid, { method: 'POST' });
+    load();
+  } catch (err) {
+    alert('Delete failed: ' + err.message);
+  }
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

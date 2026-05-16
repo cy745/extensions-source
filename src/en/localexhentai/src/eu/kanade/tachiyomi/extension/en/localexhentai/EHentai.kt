@@ -2,7 +2,13 @@ package eu.kanade.tachiyomi.extension.en.localexhentai
 
 import android.annotation.SuppressLint
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.net.Uri
+import android.util.Log
 import android.webkit.CookieManager
 import androidx.preference.CheckBoxPreference
 import androidx.preference.EditTextPreference
@@ -26,13 +32,21 @@ import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import okhttp3.CacheControl
 import okhttp3.CookieJar
+import okhttp3.Dispatcher
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.jsoup.nodes.Element
 import rx.Observable
+import java.io.ByteArrayOutputStream
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
 abstract class EHentai(
     override val lang: String,
@@ -60,6 +74,9 @@ abstract class EHentai(
     override val supportsLatest = true
 
     private var lastMangaId = ""
+
+    // Action tags — store gallery path so tag search can reconstruct full URL
+    private val gidToGalleryPath = ConcurrentHashMap<String, String>()
 
     // true if lang is a "natural human language"
     private fun isLangNatural(): Boolean = lang !in listOf("none", "other")
@@ -106,21 +123,167 @@ abstract class EHentai(
         return MangasPage(parsedMangas, hasNextPage)
     }
 
-    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.just(
-        listOf(
+    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> {
+        val realChapters = listOf(
             SChapter.create().apply {
                 url = manga.url
                 name = "Chapter"
                 chapter_number = 1f
             },
-        ),
-    )
-
-    override fun fetchPageList(chapter: SChapter) = fetchChapterPage(chapter, "$baseUrl/${chapter.url}").map {
-        it.mapIndexed { i, s ->
-            Page(i, s)
+        )
+        val chapters = if (getCacheServerUrlPref().isNotBlank()) {
+            val gid = manga.url.split("/").getOrNull(2) ?: ""
+            val browseChapter = SChapter.create().apply {
+                name = "📖 浏览"
+                url = MenuActions.menuUrl(MenuActions.ACTION_BROWSE, gid, manga.url)
+                chapter_number = -4f
+            }
+            listOf(browseChapter) + realChapters
+        } else {
+            realChapters
         }
-    }!!
+        return Observable.just(chapters)
+    }
+
+    override fun fetchPageList(chapter: SChapter): Observable<List<Page>> {
+        if (chapter.url.startsWith(MenuActions.INTENT_PREFIX)) {
+            if (MenuActions.parseAction(chapter.url) == MenuActions.ACTION_BROWSE) {
+                return Observable.fromCallable {
+                    browseFromCache(chapter.url)
+                }
+            }
+            return Observable.just(MenuActions.generateMenuPages(chapter.url))
+        }
+        return fetchChapterPage(chapter, "$baseUrl/${chapter.url}").map {
+            it.mapIndexed { i, s ->
+                Page(i, s)
+            }
+        }!!
+    }
+
+    private fun browseFromCache(chapterUrl: String): List<Page> {
+        val cacheUrl = getCacheServerUrlPref()
+        if (cacheUrl.isBlank()) return emptyList()
+        val gid = MenuActions.getQueryParam(chapterUrl, "gid") ?: return emptyList()
+
+        // Strip /proxy suffix for API URLs and gallery file serving
+        val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+
+        try {
+            val request = GET("$apiBase/api/browse?gid=$gid")
+            val response = client.newCall(request).execute()
+            val body = response.body?.string() ?: return emptyList()
+            val json = org.json.JSONObject(body)
+
+            if (json.optString("status") != "ready") {
+                val msg = json.optString("message", "Gallery not ready")
+                return listOf(
+                    Page(0, MenuActions.INTENT_PREFIX).apply {
+                        imageUrl = "$MenuActions.INTENT_PREFIX-browse-msg/$msg"
+                    },
+                )
+            }
+
+            val images = json.optJSONArray("images") ?: return emptyList()
+            val pages = mutableListOf<Page>()
+            for (i in 0 until images.length()) {
+                val imgUrl = images.getString(i)
+                val fullUrl = if (imgUrl.startsWith("http")) imgUrl else "$apiBase$imgUrl"
+                pages.add(Page(i, fullUrl).apply { imageUrl = fullUrl })
+            }
+            return pages
+        } catch (e: Exception) {
+            return listOf(
+                Page(0, MenuActions.INTENT_PREFIX).apply {
+                    imageUrl = "$MenuActions.INTENT_PREFIX-browse-err/${e.message}"
+                },
+            )
+        }
+    }
+
+    private fun buildActionResponse(chain: Interceptor.Chain, title: String, subtitle: String, isSuccess: Boolean, progress: Float? = null): Response {
+        val width = 1080
+        val height = 1920
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        val bgColor = when {
+            progress != null && progress < 1f -> 0xFF1565C0.toInt()
+            isSuccess -> 0xFF2E7D32.toInt()
+            else -> 0xFFC62828.toInt()
+        }
+        canvas.drawColor(bgColor)
+
+        val titlePaint = Paint().apply {
+            color = 0xFFFFFFFF.toInt()
+            textSize = 80f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        canvas.drawText(title, width / 2f, height / 2f - 120f, titlePaint)
+
+        val subPaint = Paint().apply {
+            color = 0xCCFFFFFF.toInt()
+            textSize = 44f
+            textAlign = Paint.Align.CENTER
+            isAntiAlias = true
+        }
+        canvas.drawText(subtitle, width / 2f, height / 2f - 40f, subPaint)
+
+        progress?.let { p ->
+            if (p < 1f) {
+                val barW = 720f
+                val barH = 48f
+                val barL = (width - barW) / 2f
+                val barT = height / 2f + 60f
+                val bgPaint = Paint().apply {
+                    color = 0x33FFFFFF
+                    style = Paint.Style.FILL
+                }
+                canvas.drawRoundRect(RectF(barL, barT, barL + barW, barT + barH), 24f, 24f, bgPaint)
+                val fillPaint = Paint().apply {
+                    color = 0xFF42A5F5.toInt()
+                    style = Paint.Style.FILL
+                }
+                val fillR = barL + barW * p.coerceIn(0f, 1f)
+                if (fillR > barL) canvas.drawRoundRect(RectF(barL, barT, fillR, barT + barH), 24f, 24f, fillPaint)
+                val pctPaint = Paint().apply {
+                    color = 0xFFFFFFFF.toInt()
+                    textSize = 48f
+                    textAlign = Paint.Align.CENTER
+                    isAntiAlias = true
+                    typeface = Typeface.DEFAULT_BOLD
+                }
+                canvas.drawText("${(p * 100).toInt()}%", width / 2f, barT + barH + 60f, pctPaint)
+            }
+        }
+
+        val bos = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 100, bos)
+        return Response.Builder()
+            .code(200).message("OK")
+            .body(bos.toByteArray().toResponseBody("image/png".toMediaType()))
+            .request(chain.request())
+            .protocol(Protocol.HTTP_1_1)
+            .build()
+    }
+
+    override fun fetchImageUrl(page: Page): Observable<String> {
+        val imageUrl = page.imageUrl
+        if (imageUrl?.startsWith(MenuActions.INTENT_PREFIX) == true) {
+            return Observable.just(imageUrl)
+        }
+        return super.fetchImageUrl(page)
+    }
+
+    override fun imageRequest(page: Page): Request {
+        val imageUrl = page.imageUrl
+        if (imageUrl?.startsWith(MenuActions.INTENT_PREFIX) == true) {
+            return GET(imageUrl)
+        }
+        return super.imageRequest(page)
+    }
 
     /**
      * Recursively fetch chapter pages
@@ -248,7 +411,7 @@ abstract class EHentai(
     @SuppressLint("DefaultLocale")
     override fun mangaDetailsParse(response: Response) = with(response.asJsoup()) {
         with(ExGalleryMetadata()) {
-            url = response.request.url.encodedPath
+            url = response.request.url.encodedPath.removePrefix("/proxy")
             title = select("#gn").text().nullIfBlank()?.trim()
 
             altTitle = select("#gj").text().nullIfBlank()?.trim()
@@ -321,12 +484,27 @@ abstract class EHentai(
                 tags[namespace] = currentTags
             }
 
+            // Add action tags if cache server is configured
+            val rawUrl = url ?: ""
+            // Strip /proxy prefix when going through cache server
+            val cleanUrl = rawUrl.removePrefix("/proxy")
+            val gid = cleanUrl.split("/").getOrNull(2) ?: ""
+            if (gid.isNotEmpty()) {
+                gidToGalleryPath[gid] = cleanUrl
+                if (gidToGalleryPath.size > 100) gidToGalleryPath.clear()
+            }
+
             if (!getTranslateTagServerUrlPref().isBlank()) tagTranslate(tags)
 
             // Copy metadata to manga
             SManga.create().apply {
                 copyTo(this)
                 update_strategy = UpdateStrategy.ONLY_FETCH_ONCE
+                // Append clickable action genres (only when cache server is configured)
+                if (getCacheServerUrlPref().isNotBlank() && gid.isNotEmpty()) {
+                    val extras = "⚡dl:$gid, ⚡st:$gid"
+                    genre = if (genre.isNullOrBlank()) extras else "$genre, $extras"
+                }
             }
         }
     }
@@ -339,13 +517,91 @@ abstract class EHentai(
         return MangasPage(listOf(details), false)
     }
 
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = if (query.startsWith(PREFIX_ID_SEARCH)) {
-        val id = query.removePrefix(PREFIX_ID_SEARCH)
-        client.newCall(searchMangaByIdRequest(id))
-            .asObservableSuccess()
-            .map { response -> searchMangaByIdParse(response, id) }
-    } else {
-        super.fetchSearchManga(page, query, filters)
+    // -----------------------------------------------------------------------
+    // Action tags — intercept tag search, execute action, return fake result
+    // -----------------------------------------------------------------------
+
+    private fun executeActionTag(query: String): MangasPage {
+        // Format: ⚡dl:gid, ⚡br:gid, ⚡st:gid
+        val tag = query.trim()
+        val colonIdx = tag.indexOf(':')
+        if (colonIdx < 0) return MangasPage(emptyList(), false)
+        val action = tag.substring(0, colonIdx) // ⚡dl, ⚡br, ⚡st
+        val gid = tag.substring(colonIdx + 1).trim()
+
+        val cacheUrl = getCacheServerUrlPref()
+        val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+
+        var resultMessage = ""
+
+        when {
+            action == "⚡dl" -> {
+                val galleryPath = gidToGalleryPath[gid] ?: ""
+                val galleryUrl = if (galleryPath.isNotEmpty()) "$baseUrl$galleryPath" else ""
+                val jsonBody = """{"gid":"$gid","galleryUrl":"$galleryUrl","dltype":"res"}"""
+                try {
+                    val request = Request.Builder()
+                        .url("$apiBase/api/download")
+                        .addHeader("Content-Type", "application/json")
+                        .post(jsonBody.toRequestBody("application/json".toMediaType()))
+                        .build()
+                    val resp = client.newCall(request).execute()
+                    val body = resp.body?.string() ?: "{}"
+                    val json = org.json.JSONObject(body)
+                    val status = json.optString("status", "error")
+                    resultMessage = if (status == "queued" || status == "already_queued") "✅ 下载已提交" else "❌ 下载失败"
+                } catch (e: Exception) {
+                    resultMessage = "❌ 网络错误"
+                }
+            }
+            action == "⚡st" -> {
+                try {
+                    val request = Request.Builder()
+                        .url("$apiBase/api/status?gid=$gid")
+                        .build()
+                    val resp = client.newCall(request).execute()
+                    val body = resp.body?.string() ?: "{}"
+                    val json = org.json.JSONObject(body)
+                    val status = json.optString("status", "unknown")
+                    val progress = json.optInt("progress", 0)
+                    val error = json.optString("error", "")
+                    resultMessage = when (status) {
+                        "completed" -> "✅ 下载完成"
+                        "downloading" -> "⬇ 下载中 $progress%"
+                        "archiver_access" -> "🔄 连接存档中"
+                        "extracting" -> "📦 解压中"
+                        "queued" -> "⏳ 排队中"
+                        "error" -> "❌ $error"
+                        else -> "❓ 未知状态"
+                    }
+                } catch (e: Exception) {
+                    resultMessage = "❌ 网络错误"
+                }
+            }
+            else -> {
+                resultMessage = "❓ 未知操作"
+            }
+        }
+
+        val fakeManga = SManga.create().apply {
+            title = resultMessage
+            url = "/g/$gid/"
+            thumbnail_url = "${MenuActions.INTENT_PREFIX}$ACTION_RESULT/$gid"
+        }
+        return MangasPage(listOf(fakeManga), false)
+    }
+
+    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> = when {
+        query.startsWith(PREFIX_ID_SEARCH) -> {
+            val id = query.removePrefix(PREFIX_ID_SEARCH)
+            client.newCall(searchMangaByIdRequest(id))
+                .asObservableSuccess()
+                .map { response -> searchMangaByIdParse(response, id) }
+        }
+        query.startsWith(ACTION_TAG_PREFIX) -> {
+            Observable.fromCallable { executeActionTag(query) }
+        }
+        else -> super.fetchSearchManga(page, query, filters)
     }
 
     private fun tagTranslate(tags: MutableMap<String, List<Tag>>) {
@@ -462,6 +718,71 @@ abstract class EHentai(
 
     override val client = network.cloudflareClient.newBuilder()
         .cookieJar(CookieJar.NO_COOKIES)
+        .dispatcher(
+            Dispatcher().apply {
+                maxRequests = 64
+                maxRequestsPerHost = 64
+            },
+        )
+        .addInterceptor { chain ->
+            val url = chain.request().url.toString()
+            val cacheUrl = getCacheServerUrlPref()
+
+            // Handle menu action page image requests (bitmap rendering)
+            if (url.startsWith(MenuActions.INTENT_PREFIX)) {
+                val action = MenuActions.parseAction(url) ?: return@addInterceptor chain.proceed(chain.request())
+
+                // Action-tag search result thumbnail
+                if (action == ACTION_RESULT) {
+                    val gid = url.removePrefix(MenuActions.INTENT_PREFIX)
+                        .removePrefix("$ACTION_RESULT/").trimEnd('/').substringBefore("?")
+                    val msg = "GID: $gid"
+                    return@addInterceptor buildActionResponse(chain, "操作结果", msg, true, 1f)
+                }
+
+                // Try scenario-based response (existing menu pages)
+                val scenarioResp = MenuActions.buildImageResponse(url, chain)
+                if (scenarioResp != null) return@addInterceptor scenarioResp
+
+                // Handle browse-msg / browse-err or other unknown intent URLs
+                val errMsg = when {
+                    action.startsWith("browse-msg/") -> action.removePrefix("browse-msg/")
+                    action.startsWith("browse-err/") -> "Error: ${action.removePrefix("browse-err/")}"
+                    else -> "Unknown action: $action"
+                }
+                return@addInterceptor buildActionResponse(chain, errMsg, "GID: ${MenuActions.getQueryParam(url, "gid")}", false)
+            }
+            chain.proceed(chain.request())
+        }
+        .addInterceptor { chain ->
+            val cacheUrl = getCacheServerUrlPref()
+            Log.d("EHCache", "cacheUrl from pref: '$cacheUrl'")
+            if (cacheUrl.isNotBlank()) {
+                val original = chain.request()
+                val originalUrl = original.url
+                val cacheHttpUrl = cacheUrl.trimEnd('/').toHttpUrl()
+
+                // Skip rewrite if URL already points to the cache server (e.g. browse gallery images)
+                if (originalUrl.host == cacheHttpUrl.host && originalUrl.port == cacheHttpUrl.port) {
+                    return@addInterceptor chain.proceed(original)
+                }
+
+                val newUrl = originalUrl.newBuilder()
+                    .scheme(cacheHttpUrl.scheme)
+                    .host(cacheHttpUrl.host)
+                    .port(cacheHttpUrl.port)
+                    .encodedPath("/proxy${originalUrl.encodedPath}")
+                    .build()
+                Log.d("EHCache", "rewritten URL: $newUrl")
+                val newRequest = original.newBuilder()
+                    .url(newUrl)
+                    .removeHeader("X-Original-Host")
+                    .addHeader("X-Original-Host", originalUrl.host)
+                    .build()
+                return@addInterceptor chain.proceed(newRequest)
+            }
+            chain.proceed(chain.request())
+        }
         .addInterceptor { chain ->
             val request = chain.request()
             val result = runCatching { chain.proceed(request) }
@@ -476,6 +797,27 @@ abstract class EHentai(
                     .url(newImageUrl)
                     .build()
 
+                // Rewrite backup image URL through cache server (Interceptor chain
+                // doesn't loop back to Cache Rewrite, so we do it manually here)
+                val cacheUrl = getCacheServerUrlPref()
+                if (cacheUrl.isNotBlank()) {
+                    try {
+                        val cacheHttpUrl = cacheUrl.trimEnd('/').toHttpUrl()
+                        val imageHttpUrl = newImageUrl.toHttpUrl()
+                        val proxiedUrl = imageHttpUrl.newBuilder()
+                            .scheme(cacheHttpUrl.scheme)
+                            .host(cacheHttpUrl.host)
+                            .port(cacheHttpUrl.port)
+                            .encodedPath("/proxy${imageHttpUrl.encodedPath}")
+                            .build()
+                        val finalRequest = newImageRequest.newBuilder()
+                            .url(proxiedUrl)
+                            .removeHeader("X-Original-Host")
+                            .addHeader("X-Original-Host", imageHttpUrl.host)
+                            .build()
+                        return@addInterceptor chain.proceed(finalRequest)
+                    } catch (_: Exception) {}
+                }
                 chain.proceed(newImageRequest)
             } else {
                 result.getOrThrow()
@@ -644,6 +986,8 @@ abstract class EHentai(
     )
 
     companion object {
+        const val ACTION_TAG_PREFIX = "⚡"
+        const val ACTION_RESULT = "action-result"
         const val QUERY_PREFIX = "?f_apply=Apply+Filter"
         const val PREFIX_ID_SEARCH = "id:"
         const val TR_SUFFIX = "TR"
@@ -683,6 +1027,11 @@ abstract class EHentai(
         private const val TRANSLATE_TAG_SERVER_URL_PREF_TITLE = "Tag translation server URL"
         private const val TRANSLATE_TAG_SERVER_URL_PREF_SUMMARY = "URL of the tag translation server"
         private const val TRANSLATE_TAG_SERVER_URL_PREF_DEFAULT_VALUE = ""
+
+        private const val CACHE_SERVER_URL_PREF_KEY = "CACHE_SERVER_URL"
+        private const val CACHE_SERVER_URL_PREF_TITLE = "Cache Server URL"
+        private const val CACHE_SERVER_URL_PREF_SUMMARY = "Local cache server URL (e.g. http://192.168.1.100:8080). When set, all requests go through this server."
+        private const val CACHE_SERVER_URL_PREF_DEFAULT_VALUE = ""
     }
 
     // Preferences
@@ -740,6 +1089,14 @@ abstract class EHentai(
             setDefaultValue(TRANSLATE_TAG_SERVER_URL_PREF_DEFAULT_VALUE)
         }
 
+        val cacheServerUrlPref = EditTextPreference(screen.context).apply {
+            key = CACHE_SERVER_URL_PREF_KEY
+            title = CACHE_SERVER_URL_PREF_TITLE
+            summary = CACHE_SERVER_URL_PREF_SUMMARY
+            setDefaultValue(CACHE_SERVER_URL_PREF_DEFAULT_VALUE)
+        }
+
+        screen.addPreference(cacheServerUrlPref)
         screen.addPreference(forceEhPref)
         screen.addPreference(memberIdPref)
         screen.addPreference(passHashPref)
@@ -755,6 +1112,9 @@ abstract class EHentai(
 
     private fun getTranslateTagServerUrlPref(): String = preferences.getString(TRANSLATE_TAG_SERVER_URL_PREF_KEY, TRANSLATE_TAG_SERVER_URL_PREF_DEFAULT_VALUE)
         ?: TRANSLATE_TAG_SERVER_URL_PREF_DEFAULT_VALUE
+
+    private fun getCacheServerUrlPref(): String = preferences.getString(CACHE_SERVER_URL_PREF_KEY, CACHE_SERVER_URL_PREF_DEFAULT_VALUE)
+        ?: CACHE_SERVER_URL_PREF_DEFAULT_VALUE
 
     private fun getCookieValue(cookieTitle: String, defaultValue: String, prefKey: String): String {
         val cookies = webViewCookieManager.getCookie("https://forums.e-hentai.org")

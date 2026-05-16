@@ -1,0 +1,16 @@
+{
+  "name": "ehentai-cache-server",
+  "version": "1.0.0",
+  "description": "Caching reverse proxy for E-Hentai extension, enables offline access to cached content",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.17",
+    "express": "^5.2.1"
+  }
+}
