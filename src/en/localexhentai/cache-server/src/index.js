@@ -148,11 +148,6 @@ function setCache(url, statusCode, headers, data) {
 // Proxy helpers
 // ---------------------------------------------------------------------------
 
-function parseUpstreamHost(raw) {
-  const u = raw.startsWith('http') ? new URL(raw) : new URL(`https://${raw}`);
-  return { hostname: u.hostname, port: u.port || '443', protocol: u.protocol };
-}
-
 function buildOriginalUrl(upstream, reqPath, reqQuery) {
   const base = upstream.replace(/\/+$/, '');
   const qs = reqQuery ? `?${reqQuery}` : '';
@@ -321,8 +316,6 @@ app.get('/', (req, res) => {
 app.get('/api/dashboard', (req, res) => {
   const jobs = store.listJobs();
   const galleries = store.listGalleries();
-  const queueInfo = downloader.getQueueInfo();
-
   const queued = jobs
     .filter(j => ['queued', 'downloading', 'archiver_access', 'extracting'].includes(j.status))
     .map(j => ({ gid: j.gid, status: j.status, progress: j.progress || 0, message: j.message || '' }));
@@ -361,6 +354,11 @@ function saveSettings(s) {
   try { fs.writeFileSync(SETTINGS_PATH, JSON.stringify(s, null, 2)); } catch {}
 }
 
+// Apply maxConcurrent from settings to downloader
+function applyMaxConcurrent(settings) {
+  if (settings.maxConcurrent) downloader.setMaxConcurrent(settings.maxConcurrent);
+}
+
 // Settings API
 app.get('/api/settings', (req, res) => res.json(loadSettings()));
 app.put('/api/settings', (req, res) => {
@@ -369,9 +367,14 @@ app.put('/api/settings', (req, res) => {
   if (body.ipb_member_id !== undefined) current.ipb_member_id = body.ipb_member_id;
   if (body.ipb_pass_hash !== undefined) current.ipb_pass_hash = body.ipb_pass_hash;
   if (body.igneous !== undefined) current.igneous = body.igneous;
+  if (body.maxConcurrent !== undefined) current.maxConcurrent = Math.max(1, Math.min(10, parseInt(body.maxConcurrent) || 2));
+  applyMaxConcurrent(current);
   saveSettings(current);
   res.json({ success: true });
 });
+
+// Apply on startup
+applyMaxConcurrent(loadSettings());
 
 // Build cookie string from settings
 function buildDefaultCookies() {

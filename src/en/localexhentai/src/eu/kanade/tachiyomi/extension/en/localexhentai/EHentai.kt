@@ -136,12 +136,28 @@ abstract class EHentai(
         )
         val chapters = if (getCacheServerUrlPref().isNotBlank()) {
             val gid = manga.url.split("/").getOrNull(2) ?: ""
-            val browseChapter = SChapter.create().apply {
-                name = "📖 浏览"
-                url = MenuActions.menuUrl(MenuActions.ACTION_BROWSE, gid, manga.url)
-                chapter_number = -4f
+            // Only show browse chapter if gallery is downloaded
+            val isCompleted = try {
+                val cacheUrl = getCacheServerUrlPref()
+                val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+                val req = GET("$apiBase/api/status?gid=$gid")
+                val resp = client.newCall(req).execute()
+                val json = org.json.JSONObject(resp.body?.string() ?: "{}")
+                json.optString("status") == "completed"
+            } catch (_: Exception) {
+                false
             }
-            listOf(browseChapter) + realChapters
+            if (isCompleted) {
+                listOf(
+                    SChapter.create().apply {
+                        name = "📖 浏览"
+                        url = MenuActions.menuUrl(MenuActions.ACTION_BROWSE, gid, manga.url)
+                        chapter_number = -4f
+                    },
+                )
+            } else {
+                realChapters
+            }
         } else {
             realChapters
         }
@@ -155,7 +171,7 @@ abstract class EHentai(
                     browseFromCache(chapter.url)
                 }
             }
-            return Observable.just(MenuActions.generateMenuPages(chapter.url))
+            return Observable.just(emptyList())
         }
         return fetchChapterPage(chapter, "$baseUrl/${chapter.url}").map {
             it.mapIndexed { i, s ->
@@ -554,6 +570,9 @@ abstract class EHentai(
                     }
                     lastRefreshTime = now
                     // Fetch and show download status at top of description
+                    val dlRaw = fetchDownloadRawStatus(gid)
+                    // Force chapter re-fetch when download completes
+                    if (dlRaw == "completed") update_strategy = UpdateStrategy.ALWAYS_UPDATE
                     val statusText = fetchDownloadStatus(gid)
                     if (statusText.isNotEmpty()) {
                         description = "$statusText\n\n${description.orEmpty()}"
@@ -669,6 +688,18 @@ abstract class EHentai(
                 .build()
             client.newCall(request).execute()
         } catch (_: Exception) {}
+    }
+
+    // Fetch raw download status for update strategy
+    private fun fetchDownloadRawStatus(gid: String): String = try {
+        val cacheUrl = getCacheServerUrlPref()
+        val apiBase = cacheUrl.trimEnd('/').removeSuffix("/proxy")
+        val request = GET("$apiBase/api/status?gid=$gid")
+        val resp = client.newCall(request).execute()
+        val json = org.json.JSONObject(resp.body?.string() ?: "{}")
+        json.optString("status", "idle")
+    } catch (_: Exception) {
+        "idle"
     }
 
     // Fetch download status text for description header
@@ -851,13 +882,8 @@ abstract class EHentai(
                 if (action == ACTION_RESULT) {
                     val gid = url.removePrefix(MenuActions.INTENT_PREFIX)
                         .removePrefix("$ACTION_RESULT/").trimEnd('/').substringBefore("?")
-                    val msg = "GID: $gid"
-                    return@addInterceptor buildActionResponse(chain, "操作结果", msg, true, 1f)
+                    return@addInterceptor buildActionResponse(chain, "操作结果", "GID: $gid", true, 1f)
                 }
-
-                // Try scenario-based response (existing menu pages)
-                val scenarioResp = MenuActions.buildImageResponse(url, chain)
-                if (scenarioResp != null) return@addInterceptor scenarioResp
 
                 // Handle browse-msg / browse-err or other unknown intent URLs
                 val errMsg = when {
