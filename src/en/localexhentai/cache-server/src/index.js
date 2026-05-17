@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { URL } = require('url');
+const { imageSize } = require('image-size');
 const express = require('express');
 const store = require('./store');
 const downloader = require('./downloader');
@@ -309,10 +310,11 @@ app.use(express.json());
 const multer = require('multer');
 const upload = multer({ dest: path.join(CACHE_DIR, 'uploads'), limits: { fileSize: 5000 * 1024 * 1024 } });
 
-// Dashboard HTML
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dashboard.html'));
-});
+// Serve React build (production)
+const REACT_DIST = path.join(__dirname, '../web/dist');
+if (fs.existsSync(REACT_DIST)) {
+  app.use(express.static(REACT_DIST));
+}
 
 // Dashboard data API
 app.get('/api/dashboard', (req, res) => {
@@ -629,6 +631,136 @@ app.get('/api/downloaded', (req, res) => {
     page,
   });
 });
+
+// Gallery waterfall API — flat paginated list of all images across all galleries
+app.get('/api/gallery-images', (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page || '1', 10));
+  const perPage = Math.min(120, Math.max(1, parseInt(req.query.perPage || '60', 10)));
+  const galleries = store.listGalleries().filter(g => g.status === 'completed');
+
+  const allImages = [];
+  for (const g of galleries) {
+    const dir = path.join(GALLERIES_DIR, String(g.gid));
+    try {
+      const files = fs.readdirSync(dir)
+        .filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f) && !f.startsWith('cover.'))
+        .sort((a, b) => {
+          const na = parseInt(a.match(/(\d+)/)?.[1] || '0', 10);
+          const nb = parseInt(b.match(/(\d+)/)?.[1] || '0', 10);
+          return na - nb;
+        });
+      for (const f of files) {
+        allImages.push({
+          gid: g.gid,
+          title: g.title || '',
+          url: `/api/galleries/${g.gid}/${f}`,
+        });
+      }
+    } catch {}
+  }
+
+  const total = allImages.length;
+  const start = (page - 1) * perPage;
+  const images = allImages.slice(start, start + perPage);
+
+  res.json({ images, total, page, perPage, hasNext: start + perPage < total });
+});
+
+// Gallery overview — each gallery with first image + cover
+app.get('/api/gallery-overview', (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page || '1', 10));
+  const perPage = Math.min(50, Math.max(1, parseInt(req.query.perPage || '24', 10)));
+  const galleries = store.listGalleries().filter(g => g.status === 'completed');
+
+  const result = [];
+  for (const g of galleries) {
+    const dir = path.join(GALLERIES_DIR, String(g.gid));
+    try {
+      const files = fs.readdirSync(dir)
+        .filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f))
+        .sort((a, b) => {
+          const na = parseInt(a.match(/(\d+)/)?.[1] || '0', 10);
+          const nb = parseInt(b.match(/(\d+)/)?.[1] || '0', 10);
+          return na - nb;
+        });
+      const cover = files.find(f => f.startsWith('cover.')) || '';
+      const firstImage = files.find(f => !f.startsWith('cover.')) || '';
+      const imageFiles = files.filter(f => !f.startsWith('cover.'));
+      result.push({
+        gid: g.gid,
+        title: g.title || '',
+        firstImageUrl: firstImage ? `/api/galleries/${g.gid}/${firstImage}` : '',
+        coverUrl: cover ? `/api/galleries/${g.gid}/${cover}` : '',
+        totalImages: imageFiles.length,
+      });
+    } catch {}
+  }
+
+  const total = result.length;
+  const start = (page - 1) * perPage;
+  const list = result.slice(start, start + perPage);
+
+  res.json({ list, total, page, perPage, hasNext: start + perPage < total });
+});
+
+// Gallery detail — paginated images for a specific gallery
+app.get('/api/gallery-detail/:gid', (req, res) => {
+  const gid = req.params.gid;
+  const page = Math.max(1, parseInt(req.query.page || '1', 10));
+  const perPage = Math.min(120, Math.max(1, parseInt(req.query.perPage || '60', 10)));
+
+  const gallery = store.getGallery(gid);
+  if (!gallery || gallery.status !== 'completed') {
+    return res.status(404).json({ error: 'Gallery not found' });
+  }
+
+  const dir = path.join(GALLERIES_DIR, String(gid));
+  let files = [];
+  try {
+    files = fs.readdirSync(dir)
+      .filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f) && !f.startsWith('cover.'))
+      .sort((a, b) => {
+        const na = parseInt(a.match(/(\d+)/)?.[1] || '0', 10);
+        const nb = parseInt(b.match(/(\d+)/)?.[1] || '0', 10);
+        return na - nb;
+      });
+  } catch {}
+
+  const total = files.length;
+  const start = (page - 1) * perPage;
+  const images = files.slice(start, start + perPage).map(f => {
+    let w = 0, h = 0;
+    try {
+      const dim = imageSize(fs.readFileSync(path.join(dir, f)));
+      w = dim.width; h = dim.height;
+    } catch {}
+    return { url: `/api/galleries/${gid}/${f}`, w, h };
+  });
+
+  // Find cover
+  let coverUrl = '';
+  try {
+    const allFiles = fs.readdirSync(dir).filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f));
+    const cover = allFiles.find(f => f.startsWith('cover.'));
+    if (cover) coverUrl = `/api/galleries/${gid}/${cover}`;
+  } catch {}
+
+  res.json({
+    images, total, page, perPage,
+    hasNext: start + perPage < total,
+    title: gallery.title || '',
+    gid,
+    coverUrl,
+  });
+});
+
+// SPA fallback — all non-API, non-proxy routes serve the React app
+if (fs.existsSync(REACT_DIST)) {
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api/') || req.path.startsWith('/proxy/')) return next();
+    res.sendFile(path.join(REACT_DIST, 'index.html'));
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Proxy route — handles all /proxy/* requests by forwarding to upstream

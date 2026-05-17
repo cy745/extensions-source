@@ -12,6 +12,7 @@
   "dependencies": {
     "adm-zip": "^0.5.17",
     "express": "^5.2.1",
+    "image-size": "^2.0.2",
     "multer": "^2.1.1"
   }
 }
