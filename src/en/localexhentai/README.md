@@ -36,9 +36,20 @@ cache-server/                                       # Node.js Cache Server (Dock
 ├── src/
 │   ├── index.js             # Express app — proxy, API routes, caching, settings
 │   ├── downloader.js        # Archiver flow — ZIP download, extraction, queue management
-│   ├── store.js             # File-based persistence (jobs, galleries, settings)
-│   └── dashboard.html       # Preact-based management dashboard
-├── Dockerfile               # node:20-alpine
+│   └── store.js             # File-based persistence (jobs, galleries, settings)
+├── web/                                           # React Frontend (Vite + React Router)
+│   └── src/
+│       ├── App.jsx             # Routes: / /gallery /gallery/:gid
+│       ├── api.js              # API client
+│       ├── ThemeContext.jsx     # Dark/light/system theme
+│       ├── pages/
+│       │   ├── Dashboard.jsx        # Metrics, downloads, gallery library, settings
+│       │   ├── GalleryOverview.jsx  # Gallery card grid with infinite scroll
+│       │   └── GalleryDetail.jsx    # Image waterfall with lightbox
+│       └── components/
+│           ├── Lightbox.jsx     # Full-screen image viewer
+│           └── ThemeBtn.jsx     # Theme toggle button
+├── Dockerfile               # node:20-alpine (builds + serves frontend)
 ├── docker-compose.yml
 └── package.json
 ```
@@ -84,7 +95,9 @@ Setting "Show Downloaded in Latest" → "Latest" tab fetches from `/api/download
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/` | GET | — | Dashboard HTML (Preact) |
+| `/` | GET | — | Dashboard (React SPA) |
+| `/gallery` | GET | — | Gallery overview (React SPA) |
+| `/gallery/:gid` | GET | — | Gallery detail waterfall (React SPA) |
 | `/api/dashboard` | GET | — | Stats, active jobs, paginated galleries, failures |
 | `/api/download` | POST | Cookie | Enqueue gallery download (merges client + default cookies) |
 | `/api/status?gid=` | GET | — | Download status (idle/queued/downloading/completed/error) |
@@ -95,6 +108,8 @@ Setting "Show Downloaded in Latest" → "Latest" tab fetches from `/api/download
 | `/api/settings` | GET/PUT | — | Default credentials (`ipb_member_id/pass_hash/igneous`) |
 | `/api/refresh-metadata` | POST | — | Re-fetch title + cover from gallery page |
 | `/api/import` | POST | — | Upload ZIP + gallery URL for manual import |
+| `/api/gallery-overview` | GET | — | Paginated gallery cards with first image + cover |
+| `/api/gallery-detail/:gid` | GET | — | Paginated images with dimensions for waterfall |
 | `/proxy/*` | ALL | — | Proxy to upstream E-Hentai/ExHentai (strips `/proxy` prefix) |
 
 ### Proxy Behavior
@@ -118,14 +133,20 @@ Setting "Show Downloaded in Latest" → "Latest" tab fetches from `/api/download
 - Queue management: `activeJobs` Map + FIFO queue
 - Decreasing concurrency doesn't interrupt active tasks
 
-### Dashboard Features
-- **Preact** with Virtual DOM diffing (no full-DOM flicker)
-- **Dark Mode**: ☀️/🌙/🖥 toggle, persists to localStorage
-- **Gallery Library**: paginated (12/24/36/48 per page), searchable, filler elements
+### Dashboard Features (React SPA)
+- **React 19** + **React Router v7** with three routes:
+  - `/` — Dashboard: metrics, downloads, gallery library, settings, import
+  - `/gallery` — Gallery card grid with infinite scroll (module-level cache preserves state across navigation)
+  - `/gallery/:gid` — Multi-column flex waterfall with shortest-column distribution, image fade-in, lightbox
+- **Dark Mode**: ☀️/🌙/🖥 cycle toggle, persists to localStorage
+- **Gallery Library**: paginated (12/24/36/48 per page), searchable, Browse navigates to `/gallery/:gid`
 - **Quick Download**: textarea for multi-URL batch submission
 - **Import ZIP**: file upload + URL for manual gallery import
 - **Settings**: default credentials, concurrent download limit
 - **Activity Log**: failure history with Retry button
+- **Browser Back Integration**: modals and lightbox intercept `popstate` to close instead of navigating away
+- **Image Dimensions**: server pre-reads image dimensions (`image-size`), frontend uses `aspect-ratio` to prevent layout shift
+- **Infinite Scroll**: `IntersectionObserver` with 400px rootMargin preloads next pages
 
 ## Data Storage (`/app/cache/`)
 
@@ -149,12 +170,6 @@ Setting "Show Downloaded in Latest" → "Latest" tab fetches from `/api/download
 - Downloaded tab URL: `/g/{gid}/{token}/?nw=always` (matching)
 - `?nw=always` is critical for bookshelf matching — without it, Tachiyomi treats the manga as a new entry
 
-### Stale Closure Prevention
-Auto-refresh interval uses `useRef` to always call the latest `load()` function, avoiding captured stale `page`/`perPage` values.
-
-### Scroll Lock
-Modal open → `body.style.overflow = hidden` + `paddingRight` compensation for scrollbar width shift.
-
 ## Build & Deploy
 
 ```bash
@@ -162,8 +177,9 @@ Modal open → `body.style.overflow = hidden` + `paddingRight` compensation for 
 cd extensions-source
 ./gradlew :src:en:localexhentai:assembleDebug
 
-# Build & run cache server
+# Build frontend + build & run cache server
 cd src/en/localexhentai/cache-server
+npm --prefix web run build           # Build React SPA
 docker-compose build
 docker-compose up -d
 ```
