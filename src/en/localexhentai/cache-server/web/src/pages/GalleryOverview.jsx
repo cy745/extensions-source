@@ -107,10 +107,11 @@ export default function GalleryOverview() {
         <>
           <div className="overview-grid">
             {galleries.map(g => (
-              <div
+              <a
                 className="og-card"
                 key={g.gid}
-                onClick={() => navigate(`/gallery/${g.gid}`)}
+                href={`/gallery/${g.gid}`}
+                onClick={e => { if (!e.button) { e.preventDefault(); navigate(`/gallery/${g.gid}`); } }}
               >
                 {g.firstImageUrl && <img src={g.firstImageUrl} alt="" loading="lazy" onLoad={e => e.target.classList.add('loaded')} />}
                 <div className="gradient" />
@@ -118,7 +119,7 @@ export default function GalleryOverview() {
                   <div className="g-title">{g.title || '#' + g.gid}</div>
                   <div className="g-count">{g.totalImages} pages</div>
                 </div>
-              </div>
+              </a>
             ))}
           </div>
           <div className="load-more-wrap" ref={sentinelRef}>

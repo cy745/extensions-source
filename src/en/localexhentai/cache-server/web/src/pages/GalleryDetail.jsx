@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { getGalleryDetail } from '../api';
 import Lightbox from '../components/Lightbox';
+import ScrollPreview from '../components/ScrollPreview';
 import ThemeBtn from '../components/ThemeBtn';
 import screenfull from 'screenfull';
 
@@ -59,6 +60,7 @@ export default function GalleryDetail() {
   const [loaded, setLoaded] = useState(false);
   const [lbIndex, setLbIndex] = useState(-1);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadingAll, setLoadingAll] = useState(false);
   const lbRef = useRef(false);
   const lbIdxRef = useRef(0);
   const sentinelRef = useRef(null);
@@ -264,6 +266,27 @@ export default function GalleryDetail() {
     setLoadingMore(false);
   };
 
+  const loadAll = async () => {
+    if (!hasNext || loadingAll) return;
+    setLoadingAll(true);
+    try {
+      let nextPage = pageRef.current + 1;
+      while (true) {
+        const d = await getGalleryDetail(gid, nextPage);
+        setImages(prev => [...prev, ...d.images]);
+        appendCols(d.images);
+        setTotal(d.total);
+        setHasNext(d.hasNext);
+        pageRef.current = d.page;
+        if (!d.hasNext) break;
+        nextPage = d.page + 1;
+      }
+    } catch (e) {
+      console.error('Load all failed:', e);
+    }
+    setLoadingAll(false);
+  };
+
   const goBack = () => window.history.back();
   const openLb = idx => { setLbIndex(idx); lbRef.current = true; history.pushState(null, ''); };
   const closeLb = (lastIdx) => {
@@ -289,6 +312,8 @@ export default function GalleryDetail() {
           </div>
         </div>
         <div className="header-actions">
+          {hasNext && !loadingAll && <button className="theme-btn" onClick={loadAll}>Load All</button>}
+          {loadingAll && <span className="header-count" style={{color:'var(--muted)'}}>Loading…</span>}
           <button className="theme-btn" onClick={toggleFs} title={isFs ? 'Exit' : 'Fullscreen'}>{isFs ? '⤓' : '⤢'}</button>
           <ThemeBtn />
         </div>
@@ -336,6 +361,8 @@ export default function GalleryDetail() {
           </div>
         </>
       )}
+
+      {loaded && images.length > 0 && <ScrollPreview images={images} />}
 
       {lbIndex >= 0 && lbIndex < images.length && (
         <Lightbox

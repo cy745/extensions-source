@@ -9,11 +9,6 @@ import screenfull from 'screenfull';
 const previewCache = {};
 let savedScrollY = 0;
 
-function goToGallery(gid, filename) {
-  savedScrollY = window.scrollY;
-  window.location.href = `/gallery/${gid}?focus=${encodeURIComponent(filename)}`;
-}
-
 export default function RandomPreview() {
   const { seed } = useParams();
   const nav = useNavigate();
@@ -25,7 +20,33 @@ export default function RandomPreview() {
   const [hasNext, setHasNext] = useState(cache?.hasNext ?? true);
   const [loaded, setLoaded] = useState(!!cache);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [loadingAll, setLoadingAll] = useState(false);
   const [lbIndex, setLbIndex] = useState(-1);
+  const lbRef = useRef(false);
+  const lbIdxRef = useRef(0);
+
+  // Intercept browser back to close lightbox instead of navigating
+  useEffect(() => {
+    const onPop = () => {
+      if (lbRef.current) {
+        const idx = lbIdxRef.current;
+        setLbIndex(-1);
+        lbRef.current = false;
+        setTimeout(() => {
+          const el = document.querySelector(`[data-global="${idx}"]`);
+          if (el) {
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            setTimeout(() => {
+              el.classList.add('focus-flash');
+              setTimeout(() => el.classList.remove('focus-flash'), 3000);
+            }, 500);
+          }
+        }, 100);
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
   const [isFs, setIsFs] = useState(() => screenfull.isFullscreen);
   const fsRestoreIdx = useRef(-1);
   const saveCenter = () => {
@@ -121,6 +142,28 @@ export default function RandomPreview() {
     setLoadingMore(false);
   };
 
+  const loadAll = async () => {
+    if (!hasNext || loadingAll) return;
+    setLoadingAll(true);
+    try {
+      let nextPage = pageRef.current + 1;
+      while (true) {
+        const d = await fetch(`/api/random-preview/${seed}?page=${nextPage}&perPage=60`).then(r => r.json());
+        const merged = [...images, ...d.images];
+        previewCache[seed] = { images: merged, total: d.total, hasNext: d.hasNext, page: d.page };
+        setImages(merged);
+        setTotal(d.total);
+        setHasNext(d.hasNext);
+        pageRef.current = d.page;
+        if (!d.hasNext) break;
+        nextPage = d.page + 1;
+      }
+    } catch (e) {
+      console.error('Load all failed:', e);
+    }
+    setLoadingAll(false);
+  };
+
   const waterfallRef = useRef(null);
   const numCols = useColumnCount();
 
@@ -143,20 +186,24 @@ export default function RandomPreview() {
   }, [images, numCols]);
 
   const goBack = () => window.history.back();
-  const openLb = idx => setLbIndex(idx);
+  const openLb = idx => { setLbIndex(idx); lbRef.current = true; history.pushState(null, ''); };
   const closeLb = (lastIdx) => {
-    setLbIndex(-1);
-    if (lastIdx !== undefined) {
-      setTimeout(() => {
-        const el = document.querySelector(`[data-global="${lastIdx}"]`);
-        if (el) {
-          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
-          setTimeout(() => {
-            el.classList.add('focus-flash');
-            setTimeout(() => el.classList.remove('focus-flash'), 3000);
-          }, 500);
-        }
-      }, 100);
+    if (lbRef.current) {
+      lbRef.current = false;
+      setLbIndex(-1);
+      history.back();
+      if (lastIdx !== undefined) {
+        setTimeout(() => {
+          const el = document.querySelector(`[data-global="${lastIdx}"]`);
+          if (el) {
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            setTimeout(() => {
+              el.classList.add('focus-flash');
+              setTimeout(() => el.classList.remove('focus-flash'), 3000);
+            }, 500);
+          }
+        }, 100);
+      }
     }
   };
   const remaining = total - images.length;
@@ -172,6 +219,8 @@ export default function RandomPreview() {
           </div>
         </div>
         <div className="header-actions">
+          {hasNext && !loadingAll && <button className="theme-btn" onClick={loadAll}>Load All</button>}
+          {loadingAll && <span className="header-count" style={{color:'var(--muted)'}}>Loading…</span>}
           <button className="theme-btn" onClick={toggleFs} title={isFs ? 'Exit' : 'Fullscreen'}>{isFs ? '⤓' : '⤢'}</button>
           <ThemeBtn />
         </div>
@@ -195,10 +244,11 @@ export default function RandomPreview() {
                     <img src={img.url} alt="" loading="lazy"
                       onLoad={e => e.target.classList.add('loaded')} />
                     <div className="w-item-overlay">
-                      <span className="w-item-title" onClick={e => { e.stopPropagation(); goToGallery(img.gid, img.url.split('/').pop()); }}
+                      <a className="w-item-title" href={`/gallery/${img.gid}?focus=${encodeURIComponent(img.url.split('/').pop())}`}
+                        onClick={e => { e.stopPropagation(); savedScrollY = window.scrollY; }}
                         title="Click to view gallery">
                         {img.title || '#' + img.gid}
-                      </span>
+                      </a>
                     </div>
                   </div>
                 ))}
@@ -218,7 +268,7 @@ export default function RandomPreview() {
       )}
 
       {lbIndex >= 0 && lbIndex < images.length && (
-        <Lightbox images={images} initialIndex={lbIndex} onClose={closeLb} onLoadMore={loadMore} loadingMore={loadingMore} isFs={isFs} onIndexChange={idx => { /* RandomPreview doesn't need popstate tracking */ }} />
+        <Lightbox images={images} initialIndex={lbIndex} onClose={closeLb} onLoadMore={loadMore} loadingMore={loadingMore} isFs={isFs} onIndexChange={idx => lbIdxRef.current = idx} />
       )}
     </div>
   );
