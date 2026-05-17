@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { getGalleryDetail } from '../api';
 import Lightbox from '../components/Lightbox';
 import ThemeBtn from '../components/ThemeBtn';
+import screenfull from 'screenfull';
 
 // Module-level cache — survives unmount/remount across route changes
 const previewCache = {};
@@ -25,6 +26,43 @@ export default function RandomPreview() {
   const [loaded, setLoaded] = useState(!!cache);
   const [loadingMore, setLoadingMore] = useState(false);
   const [lbIndex, setLbIndex] = useState(-1);
+  const [isFs, setIsFs] = useState(() => screenfull.isFullscreen);
+  const fsRestoreIdx = useRef(-1);
+  const saveCenter = () => {
+    const items = document.querySelectorAll('[data-global]');
+    if (!items.length) return;
+    const ch = window.innerHeight / 2;
+    let best = -1, bestDist = Infinity;
+    items.forEach(el => {
+      const r = el.getBoundingClientRect();
+      const d = Math.abs(r.top + r.height / 2 - ch);
+      if (d < bestDist) { bestDist = d; best = parseInt(el.dataset.global); }
+    });
+    fsRestoreIdx.current = best;
+  };
+  const setFs = (val) => { saveCenter(); setIsFs(val); };
+  useEffect(() => {
+    if (fsRestoreIdx.current < 0) return;
+    const idx = fsRestoreIdx.current;
+    fsRestoreIdx.current = -1;
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-global="${idx}"]`);
+      if (el) el.scrollIntoView({ block: 'center' });
+    });
+  }, [isFs]);
+  useEffect(() => {
+    const onChange = () => setFs(screenfull.isFullscreen);
+    screenfull.on('change', onChange);
+    const onResize = () => {
+      if (!screenfull.isFullscreen) {
+        const likelyFs = window.innerHeight >= screen.height - 50 && Math.abs(window.innerWidth - screen.width) < 50;
+        setFs(likelyFs);
+      }
+    };
+    window.addEventListener('resize', onResize);
+    return () => { screenfull.off('change', onChange); window.removeEventListener('resize', onResize); };
+  }, []);
+  const toggleFs = () => { saveCenter(); if (screenfull.isEnabled) screenfull.toggle(); };
 
   const pageRef = useRef(cache?.page || 1);
   const sentinelRef = useRef(null);
@@ -106,13 +144,25 @@ export default function RandomPreview() {
 
   const goBack = () => window.history.back();
   const openLb = idx => setLbIndex(idx);
-  const closeLb = () => setLbIndex(-1);
-  const prevLb = () => setLbIndex(i => Math.max(0, i - 1));
-  const nextLb = () => setLbIndex(i => Math.min(images.length - 1, i + 1));
+  const closeLb = (lastIdx) => {
+    setLbIndex(-1);
+    if (lastIdx !== undefined) {
+      setTimeout(() => {
+        const el = document.querySelector(`[data-global="${lastIdx}"]`);
+        if (el) {
+          el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          setTimeout(() => {
+            el.classList.add('focus-flash');
+            setTimeout(() => el.classList.remove('focus-flash'), 3000);
+          }, 500);
+        }
+      }, 100);
+    }
+  };
   const remaining = total - images.length;
 
   return (
-    <div className="app app--gallery">
+    <div className={`app app--gallery${isFs ? ' app--fullscreen' : ''}`}>
       <header className="header">
         <div className="detail-header-left">
           <button className="back-btn" onClick={goBack}>← Back</button>
@@ -121,7 +171,10 @@ export default function RandomPreview() {
             <div className="detail-sub">{total} images · seed #{seed}</div>
           </div>
         </div>
-        <div className="header-actions"><ThemeBtn /></div>
+        <div className="header-actions">
+          <button className="theme-btn" onClick={toggleFs} title={isFs ? 'Exit' : 'Fullscreen'}>{isFs ? '⤓' : '⤢'}</button>
+          <ThemeBtn />
+        </div>
       </header>
 
       {!loaded ? (
@@ -137,7 +190,7 @@ export default function RandomPreview() {
             {columns.map((colImgs, ci) => (
               <div className="waterfall-col" key={ci}>
                 {colImgs.map(img => (
-                  <div className="w-item w-item--random" key={img.url} onClick={() => openLb(img.globalIdx)}
+                  <div className="w-item w-item--random" key={img.url} data-global={img.globalIdx} onClick={() => openLb(img.globalIdx)}
                     style={img.w && img.h ? { aspectRatio: img.w / img.h } : undefined}>
                     <img src={img.url} alt="" loading="lazy"
                       onLoad={e => e.target.classList.add('loaded')} />
@@ -165,7 +218,7 @@ export default function RandomPreview() {
       )}
 
       {lbIndex >= 0 && lbIndex < images.length && (
-        <Lightbox images={images} index={lbIndex} onClose={closeLb} onPrev={prevLb} onNext={nextLb} />
+        <Lightbox images={images} initialIndex={lbIndex} onClose={closeLb} onLoadMore={loadMore} loadingMore={loadingMore} isFs={isFs} onIndexChange={idx => { /* RandomPreview doesn't need popstate tracking */ }} />
       )}
     </div>
   );

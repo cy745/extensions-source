@@ -3,12 +3,53 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { getGalleryDetail } from '../api';
 import Lightbox from '../components/Lightbox';
 import ThemeBtn from '../components/ThemeBtn';
+import screenfull from 'screenfull';
 
 export default function GalleryDetail() {
   const { gid } = useParams();
   const [searchParams] = useSearchParams();
   const focusFile = searchParams.get('focus');
   const focusRef = useRef(null);
+
+  // Fullscreen — save center element before layout change, restore after
+  const [isFs, setIsFs] = useState(() => screenfull.isFullscreen);
+  const fsRestoreIdx = useRef(-1);
+  const saveCenter = () => {
+    const items = document.querySelectorAll('[data-global]');
+    if (!items.length) return;
+    const ch = window.innerHeight / 2;
+    let best = -1, bestDist = Infinity;
+    items.forEach(el => {
+      const r = el.getBoundingClientRect();
+      const d = Math.abs(r.top + r.height / 2 - ch);
+      if (d < bestDist) { bestDist = d; best = parseInt(el.dataset.global); }
+    });
+    fsRestoreIdx.current = best;
+  };
+  const setFs = (val) => { saveCenter(); setIsFs(val); };
+  // Restore scroll after fullscreen layout change settles
+  useEffect(() => {
+    if (fsRestoreIdx.current < 0) return;
+    const idx = fsRestoreIdx.current;
+    fsRestoreIdx.current = -1;
+    requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-global="${idx}"]`);
+      if (el) el.scrollIntoView({ block: 'center' });
+    });
+  }, [isFs]);
+  useEffect(() => {
+    const onChange = () => setFs(screenfull.isFullscreen);
+    screenfull.on('change', onChange);
+    const onResize = () => {
+      if (!screenfull.isFullscreen) {
+        const likelyFs = window.innerHeight >= screen.height - 50 && Math.abs(window.innerWidth - screen.width) < 50;
+        setFs(likelyFs);
+      }
+    };
+    window.addEventListener('resize', onResize);
+    return () => { screenfull.off('change', onChange); window.removeEventListener('resize', onResize); };
+  }, []);
+  const toggleFs = () => { saveCenter(); if (screenfull.isEnabled) screenfull.toggle(); };
 
   const [images, setImages] = useState([]);
   const [title, setTitle] = useState('');
@@ -19,14 +60,30 @@ export default function GalleryDetail() {
   const [lbIndex, setLbIndex] = useState(-1);
   const [loadingMore, setLoadingMore] = useState(false);
   const lbRef = useRef(false);
+  const lbIdxRef = useRef(0);
   const sentinelRef = useRef(null);
+
+  const scrollToItem = (idx) => {
+    setTimeout(() => {
+      const el = document.querySelector(`[data-global="${idx}"]`);
+      if (el) {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        setTimeout(() => {
+          el.classList.add('focus-flash');
+          setTimeout(() => el.classList.remove('focus-flash'), 3000);
+        }, 500);
+      }
+    }, 100);
+  };
 
   // Intercept browser back to close lightbox instead of navigating
   useEffect(() => {
     const onPop = () => {
       if (lbRef.current) {
+        const idx = lbIdxRef.current;
         setLbIndex(-1);
         lbRef.current = false;
+        scrollToItem(idx);
       }
     };
     window.addEventListener('popstate', onPop);
@@ -209,14 +266,19 @@ export default function GalleryDetail() {
 
   const goBack = () => window.history.back();
   const openLb = idx => { setLbIndex(idx); lbRef.current = true; history.pushState(null, ''); };
-  const closeLb = () => { if (lbRef.current) { lbRef.current = false; setLbIndex(-1); history.back(); } };
-  const prevLb = () => { if (lbIndex > 0) setLbIndex(i => i - 1); };
-  const nextLb = () => { if (lbIndex < images.length - 1) setLbIndex(i => i + 1); };
+  const closeLb = (lastIdx) => {
+    if (lbRef.current) {
+      lbRef.current = false;
+      setLbIndex(-1);
+      history.back();
+      scrollToItem(lastIdx);
+    }
+  };
 
   const remaining = total - images.length;
 
   return (
-    <div className="app app--gallery">
+    <div className={`app app--gallery${isFs ? ' app--fullscreen' : ''}`}>
       <header className="header">
         <div className="detail-header-left">
           <button className="back-btn" onClick={goBack}>← Back</button>
@@ -227,6 +289,7 @@ export default function GalleryDetail() {
           </div>
         </div>
         <div className="header-actions">
+          <button className="theme-btn" onClick={toggleFs} title={isFs ? 'Exit' : 'Fullscreen'}>{isFs ? '⤓' : '⤢'}</button>
           <ThemeBtn />
         </div>
       </header>
@@ -277,10 +340,12 @@ export default function GalleryDetail() {
       {lbIndex >= 0 && lbIndex < images.length && (
         <Lightbox
           images={images}
-          index={lbIndex}
+          initialIndex={lbIndex}
           onClose={closeLb}
-          onPrev={prevLb}
-          onNext={nextLb}
+          onLoadMore={loadMore}
+          loadingMore={loadingMore}
+          onIndexChange={idx => lbIdxRef.current = idx}
+          isFs={isFs}
         />
       )}
     </div>

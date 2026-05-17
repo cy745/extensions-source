@@ -1,2 +1,4 @@
 test-downloads/
 test-cache/
+test-archiver*.js
+node_modules/
