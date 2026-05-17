@@ -52,7 +52,7 @@ function dohResolve(hostname) {
 // HTTP helpers with DoH resolution + IP fallback
 // ---------------------------------------------------------------------------
 
-function httpRequest(method, urlStr, options = {}) {
+function httpRequest(method, urlStr, options = {}, redirectDepth = 5) {
   const u = new URL(urlStr);
   const isHttps = u.protocol === 'https:';
   const mod = isHttps ? https : http;
@@ -74,6 +74,12 @@ function httpRequest(method, urlStr, options = {}) {
           rejectUnauthorized: false,
         };
         const req = mod.request(reqOpts, (res) => {
+          if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectDepth > 0) {
+            const redirectUrl = new URL(res.headers.location, urlStr).href;
+            res.destroy();
+            console.log(`[http] redirect ${res.statusCode} -> ${redirectUrl} (depth=${redirectDepth})`);
+            return httpRequest(method, redirectUrl, options, redirectDepth - 1).then(resolve, reject);
+          }
           resolve({ req, res, url: urlStr });
         });
         req.on('error', () => tryIp(idx + 1));
@@ -106,13 +112,16 @@ function extractToken(galleryUrl) {
 }
 
 // POST to archiver.php → get H@H archive node URL
-async function archiverPost(gid, token, dltype, cookies) {
-  const ARCHIVER_URL = 'https://e-hentai.org/archiver.php';
+async function archiverPost(gid, token, dltype, cookies, galleryUrl) {
+  // Use the same domain as the gallery URL (supports e-hentai.org and exhentai.org)
+  const domain = galleryUrl ? new URL(galleryUrl).hostname : 'e-hentai.org';
+  const ARCHIVER_URL = `https://${domain}/archiver.php`;
   const postBody = new URLSearchParams({
     dltype,
     dlcheck: dltype === 'org' ? 'Download Original Archive' : 'Download Resample Archive',
   }).toString();
 
+  console.log(`[dl] archiverPost: posting to ${ARCHIVER_URL}?gid=${gid}&token=${token}`);
   const { res } = await httpRequest('POST', `${ARCHIVER_URL}?gid=${gid}&token=${token}`, {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
@@ -131,19 +140,23 @@ async function archiverPost(gid, token, dltype, cookies) {
   // Otherwise parse HTML for H@H URL
   const body = (await collectBody(res)).toString('utf8');
 
+  // Log response details for debugging
+  const snippet = body.slice(0, 300).replace(/\n/g, ' ').trim();
+  console.log(`[dl] archiverPost(${gid}): status=${res.statusCode}, body_len=${body.length}, snippet="${snippet}"`);
+
   // Check for error messages
   if (body.includes('You must be logged in')) throw new Error('Authentication required — cookies missing or expired');
   if (body.includes('already generating')) {
-    // Archive is being generated — extract the H@H URL if available
+    console.log(`[dl] archiverPost(${gid}): archive still being generated`);
   }
 
   // Look for H@H URL pattern
   const match = body.match(/https?:\/\/[^\s"']*?hath\.network\/archive\/[^\s"']+/);
-  if (match) return match[0];
+  if (match) { console.log(`[dl] archiverPost(${gid}): found H@H URL`); return match[0]; }
 
   // Look for general archive URL
   const altMatch = body.match(/https?:\/\/[^\s"']*\/archive\/[^\s"']+/);
-  if (altMatch) return altMatch[0];
+  if (altMatch) { console.log(`[dl] archiverPost(${gid}): found alt archive URL`); return altMatch[0]; }
 
   throw new Error(`Archiver response: status ${res.statusCode}, no H@H URL found`);
 }
@@ -176,19 +189,42 @@ async function hathAccess(hathUrl, cookies) {
 }
 
 // Fetch gallery page metadata (title, thumbnail) via regex parsing
-async function fetchGalleryMetadata(galleryUrl) {
-  try {
-    const { res } = await httpRequest('GET', galleryUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-      timeout: 15000,
-    });
+async function fetchGalleryMetadata(galleryUrl, cookies) {
+  const tryFetch = async (url) => {
+    const headers = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' };
+    if (cookies) headers['Cookie'] = cookies;
+    const { res } = await httpRequest('GET', url, { headers, timeout: 15000 });
     const html = (await collectBody(res)).toString('utf8');
+    console.log(`[meta] HTTP ${res.statusCode}, body=${html.length} bytes`);
 
-    const title = html.match(/<h1[^>]*id="gn"[^>]*>([\s\S]*?)<\/h1>/)?.[1]?.replace(/<[^>]+>/g, '').trim() || '';
+    // Detect ban/captcha pages
+    if (/temporarily banned|excessive request rate|bounce_login|Please wait|captcha/i.test(html.slice(0, 1000))) {
+      console.log(`[meta] banned or blocked page for ${url}`);
+      return null;
+    }
+
+    const titleMatch = html.match(/<h1[^>]*id="gn"[^>]*>([\s\S]*?)<\/h1>/);
+    const title = titleMatch?.[1]?.replace(/<[^>]+>/g, '').trim() || '';
     const thumbMatch = html.match(/<div[^>]*id="gd1"[^>]*>[\s\S]*?<div[^>]*style="[^"]*url\(([^)]+)\)/);
     const thumbnailUrl = thumbMatch?.[1] || '';
+    console.log(`[meta] title="${title.slice(0,50)}", thumbnail=${thumbnailUrl ? 'yes' : 'no'}, status=${res.statusCode}`);
 
-    return { title, thumbnailUrl };
+    return { title, thumbnailUrl, statusCode: res.statusCode };
+  };
+
+  try {
+    let result = await tryFetch(galleryUrl);
+
+    // Fallback: if original was e-hentai.org and failed, retry with exhentai.org
+    if ((!result || result.statusCode >= 400 || !result.title) && galleryUrl.includes('e-hentai.org')) {
+      const fallbackUrl = galleryUrl.replace('e-hentai.org', 'exhentai.org');
+      console.log(`[meta] e-hentai failed, retrying with exhentai: ${fallbackUrl}`);
+      const fallback = await tryFetch(fallbackUrl);
+      if (fallback && fallback.title) result = fallback;
+    }
+
+    if (!result) return null;
+    return { title: result.title || '', thumbnailUrl: result.thumbnailUrl || '' };
   } catch (err) {
     console.log(`[dl] fetchGalleryMetadata error: ${err.message}`);
     return null;
@@ -352,8 +388,10 @@ function cleanupArchive(archivePath, gid) {
 // Queue management
 // ---------------------------------------------------------------------------
 
-const MAX_CONCURRENT = 2;
+let MAX_CONCURRENT = 2;
 const activeJobs = new Map(); // gid → job
+
+function setMaxConcurrent(n) { MAX_CONCURRENT = Math.max(1, Math.min(10, n)); }
 let queue = [];
 
 function enqueue(gid, galleryUrl, dltype, cookies) {
@@ -398,7 +436,7 @@ function processQueue() {
 
 async function executeJob(job) {
   const { gid, galleryUrl, dltype, cookies } = job;
-  console.log(`[dl] Starting archiver flow for gid=${gid}`);
+  console.log(`[dl] Starting archiver flow for gid=${gid}, galleryUrl=${galleryUrl}, dltype=${dltype}`);
 
   try {
     // Step 1: Extract token from gallery URL
@@ -408,7 +446,7 @@ async function executeJob(job) {
 
     // Step 2: POST to archiver.php → H@H node URL
     store.setJob(gid, { status: 'archiver_access', progress: 5, message: 'Contacting archiver...' });
-    let hathUrl = await archiverPost(gid, token, dltype, cookies);
+    let hathUrl = await archiverPost(gid, token, dltype, cookies, galleryUrl);
     console.log(`[dl] H@H URL: ${hathUrl}`);
 
     // Step 3: Access H@H node → download URL
@@ -434,16 +472,17 @@ async function executeJob(job) {
     cleanupArchive(archivePath, gid);
 
     // Step 7: Fetch gallery metadata + thumbnail and save alongside images
-    const meta = await fetchGalleryMetadata(galleryUrl);
+    const meta = await fetchGalleryMetadata(galleryUrl, cookies);
     if (meta) {
       try {
         const metaPath = path.join(extractDir, 'metadata.json');
         fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
         if (meta.thumbnailUrl) {
           try {
+            const imgHeaders = { 'User-Agent': 'Mozilla/5.0' };
+            if (cookies) imgHeaders['Cookie'] = cookies;
             const { res: imgRes } = await httpRequest('GET', meta.thumbnailUrl, {
-              headers: { 'User-Agent': 'Mozilla/5.0' },
-              timeout: 15000,
+              headers: imgHeaders, timeout: 15000,
             });
             const imgData = await collectBody(imgRes);
             const thumbExt = path.extname(new URL(meta.thumbnailUrl).pathname) || '.jpg';
@@ -458,8 +497,8 @@ async function executeJob(job) {
     }
 
     // Extract gallery path from galleryUrl (e.g. /g/123/token/) for manga URL matching
-    let galleryPath = '';
-    try { galleryPath = new URL(galleryUrl).pathname; } catch {}
+    let galleryPath = '', galleryDomain = '';
+    try { const u = new URL(galleryUrl); galleryPath = u.pathname; galleryDomain = u.hostname; } catch {}
 
     // Done
     const finalSize = store.getGallerySize(gid);
@@ -467,6 +506,7 @@ async function executeJob(job) {
       status: 'completed',
       title: meta?.title || '',
       galleryPath,
+      galleryDomain,
       totalImages: fileCount,
       size: finalSize,
     });
@@ -503,4 +543,4 @@ function getQueueInfo() {
   };
 }
 
-module.exports = { enqueue, getStatus, getQueueInfo };
+module.exports = { enqueue, getStatus, getQueueInfo, setMaxConcurrent, fetchGalleryMetadata };

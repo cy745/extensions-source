@@ -24,7 +24,7 @@ const CACHE_TTL_HTML_MS = parseInt(process.env.CACHE_TTL_HTML_MS || String(60 * 
 });
 
 // Ensure directories exist
-[CACHE_DIR, CACHE_FILES_DIR, GALLERIES_DIR].forEach(d => {
+[CACHE_DIR, CACHE_FILES_DIR, GALLERIES_DIR, path.join(CACHE_DIR, 'uploads')].forEach(d => {
   try { fs.mkdirSync(d, { recursive: true }); } catch {}
 });
 
@@ -306,6 +306,8 @@ function getContentType(headers) {
 
 const app = express();
 app.use(express.json());
+const multer = require('multer');
+const upload = multer({ dest: path.join(CACHE_DIR, 'uploads'), limits: { fileSize: 5000 * 1024 * 1024 } });
 
 // Dashboard HTML
 app.get('/', (req, res) => {
@@ -458,6 +460,152 @@ app.post('/api/delete', (req, res) => {
   store.deleteJob(gid);
   res.json({ status: 'deleted', gid });
   console.log(`[api] Deleted gallery ${gid}`);
+});
+
+// Refresh metadata + cover for a gallery
+app.post('/api/refresh-metadata', async (req, res) => {
+  const { gid } = req.body || {};
+  if (!gid) return res.status(400).json({ error: 'gid required' });
+  console.log(`[meta] refresh requested for gid=${gid}`);
+  try {
+    const gallery = store.getGallery(gid);
+    if (!gallery || gallery.status !== 'completed') return res.status(400).json({ error: 'Gallery not completed' });
+    const extractDir = path.join(GALLERIES_DIR, String(gid));
+    const domain = gallery.galleryDomain || 'exhentai.org';
+    const galleryUrl = gallery.galleryUrl || `https://${domain}${gallery.galleryPath || '/g/' + gid + '/?nw=always'}`;
+    console.log(`[meta] fetching metadata from ${galleryUrl}`);
+    const defaultCookies = buildDefaultCookies();
+    const meta = await downloader.fetchGalleryMetadata(galleryUrl, defaultCookies);
+    if (meta) {
+      console.log(`[meta] got title="${meta.title?.slice(0,50)}", thumbnail=${meta.thumbnailUrl ? 'yes' : 'no'}`);
+      const metaPath = path.join(extractDir, 'metadata.json');
+      try { fs.mkdirSync(extractDir, { recursive: true }); } catch {}
+      fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+      if (meta.title) {
+        store.setGallery(gid, { title: meta.title });
+        console.log(`[meta] saved title for gid=${gid}`);
+      }
+      if (meta.thumbnailUrl) {
+        try {
+          console.log(`[meta] downloading cover from ${meta.thumbnailUrl}`);
+          const imgHeaders = { 'User-Agent': 'Mozilla/5.0' };
+          if (defaultCookies) imgHeaders['Cookie'] = defaultCookies;
+          const imgResult = await proxyRequest(meta.thumbnailUrl, 'GET', imgHeaders, 1);
+          const imgData = imgResult?.data;
+          if (imgData) {
+            const thumbExt = path.extname(new URL(meta.thumbnailUrl).pathname) || '.jpg';
+            fs.writeFileSync(path.join(extractDir, 'cover' + thumbExt), imgData);
+            console.log(`[meta] cover saved (${imgData.length} bytes) for gid=${gid}`);
+          } else {
+            console.log(`[meta] cover response empty for gid=${gid}`);
+          }
+        } catch (err) {
+          console.log(`[meta] cover download failed for ${gid}: ${err.message}`);
+        }
+      } else {
+        console.log(`[meta] no thumbnail URL for gid=${gid}`);
+      }
+      res.json({ success: true, title: meta.title || '', thumbnailUrl: meta.thumbnailUrl || '' });
+    } else {
+      console.log(`[meta] fetchGalleryMetadata returned null for gid=${gid}`);
+      res.json({ success: false, error: 'Failed to fetch metadata' });
+    }
+  } catch (err) {
+    console.error(`[meta] error for gid=${gid}: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Import a ZIP file + gallery URL (manual import)
+app.post('/api/import', upload.single('file'), async (req, res) => {
+  const galleryUrl = req.body?.url || '';
+  const file = req.file;
+  if (!galleryUrl) return res.status(400).json({ error: 'galleryUrl required' });
+  if (!file) return res.status(400).json({ error: 'ZIP file required' });
+
+  const match = galleryUrl.match(/https?:\/\/(?:e-hentai|exhentai)\.org\/g\/(\d+)\/([^\/]+)/);
+  if (!match) return res.status(400).json({ error: 'Invalid gallery URL format' });
+  const gid = match[1];
+
+  console.log(`[import] gid=${gid}, url=${galleryUrl}, file=${file.originalname} (${file.size} bytes)`);
+
+  try {
+    // Check if already downloaded
+    const existing = store.getGallery(gid);
+    if (existing && existing.status === 'completed') {
+      try { fs.unlinkSync(file.path); } catch {}
+      return res.json({ status: 'already_exists', gid, message: 'Gallery already imported' });
+    }
+
+    const extractDir = path.join(GALLERIES_DIR, String(gid));
+    const archiveDir = path.join(CACHE_DIR, 'archives', String(gid));
+    fs.mkdirSync(extractDir, { recursive: true });
+    fs.mkdirSync(archiveDir, { recursive: true });
+
+    // Move uploaded file to archives
+    const archivePath = path.join(archiveDir, 'archive.zip');
+    fs.renameSync(file.path, archivePath);
+
+    // Extract
+    const { execSync } = require('child_process');
+    try {
+      execSync(`unzip -o "${archivePath}" -d "${extractDir}"`, { stdio: 'pipe', timeout: 300000 });
+    } catch {
+      // Fallback to adm-zip
+      const AdmZip = require('adm-zip');
+      const zip = new AdmZip(archivePath);
+      const entries = zip.getEntries();
+      for (const entry of entries) {
+        if (!entry.isDirectory) {
+          const basename = path.basename(entry.entryName);
+          fs.writeFileSync(path.join(extractDir, basename), entry.getData());
+        }
+      }
+    }
+
+    const fileCount = fs.readdirSync(extractDir).filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f)).length;
+    console.log(`[import] ${gid}: extracted ${fileCount} files`);
+
+    // Fetch metadata + cover
+    const defaultCookies = buildDefaultCookies();
+    const meta = await downloader.fetchGalleryMetadata(galleryUrl, defaultCookies);
+    if (meta) {
+      fs.writeFileSync(path.join(extractDir, 'metadata.json'), JSON.stringify(meta, null, 2));
+      if (meta.thumbnailUrl) {
+        try {
+          const imgHeaders = { 'User-Agent': 'Mozilla/5.0' };
+          if (defaultCookies) imgHeaders['Cookie'] = defaultCookies;
+          const imgResult = await proxyRequest(meta.thumbnailUrl, 'GET', imgHeaders, 1);
+          if (imgResult?.data) {
+            const thumbExt = path.extname(new URL(meta.thumbnailUrl).pathname) || '.jpg';
+            fs.writeFileSync(path.join(extractDir, 'cover' + thumbExt), imgResult.data);
+          }
+        } catch (err) {
+          console.log(`[import] ${gid}: cover failed: ${err.message}`);
+        }
+      }
+    }
+
+    // Clean up archive
+    try { fs.rmSync(archiveDir, { recursive: true, force: true }); } catch {}
+
+    // Save gallery record
+    let galleryPath = '';
+    try { galleryPath = new URL(galleryUrl).pathname; } catch {}
+    const galleryDomain = new URL(galleryUrl).hostname;
+    const finalSize = store.getGallerySize(gid);
+    store.setGallery(gid, {
+      status: 'completed', title: meta?.title || '', galleryPath, galleryDomain,
+      totalImages: fileCount, size: finalSize,
+    });
+    store.deleteJob(gid);
+    console.log(`[import] ${gid}: import complete (${fileCount} files)`);
+    res.json({ status: 'imported', gid, title: meta?.title || '', totalImages: fileCount });
+  } catch (err) {
+    console.error(`[import] ${gid}: error: ${err.message}`);
+    try { if (file?.path) fs.unlinkSync(file.path); } catch {}
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // List downloaded galleries (paginated, newest first)

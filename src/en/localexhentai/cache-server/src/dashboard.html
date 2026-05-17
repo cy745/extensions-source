@@ -95,6 +95,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubunt
 .btn:hover{border-color:var(--btn-hover);color:var(--btn-hover)}
 .btn-delete{border-color:transparent;color:#e74c3c}
 .btn-delete:hover{border-color:#e74c3c;background:rgba(231,76,60,.1)}
+.btn-refreshmeta{border-color:transparent;color:#3498db}
+.btn-refreshmeta:hover{border-color:#3498db;background:rgba(52,152,219,.1)}
 .btn-retry{font-size:.65rem;padding:2px 10px;flex-shrink:0}
 
 .log{display:flex;flex-direction:column;gap:1px;background:var(--border-light);border:1px solid var(--border-light);max-height:360px;overflow-y:auto}
@@ -123,9 +125,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubunt
 .paginator-btn.active{background:var(--text);border-color:var(--text);color:var(--bg)}
 .paginator-btn:disabled{opacity:.3;cursor:default}
 .paginator-dots{font-size:.75rem;color:var(--muted-light);padding:0 2px}
+.conc-control{display:flex;align-items:center;gap:12px;margin-top:6px}
+.conc-btn{background:none;border:1px solid var(--btn-border);border-radius:3px;width:32px;height:32px;
+  font-size:1rem;font-weight:600;cursor:pointer;color:var(--text);display:flex;align-items:center;justify-content:center;
+  transition:all .1s;line-height:1}
+.conc-btn:hover:not(:disabled){border-color:var(--text)}
+.conc-btn:disabled{opacity:.3;cursor:default}
+.conc-value{font-size:1.1rem;font-weight:600;color:var(--text);min-width:24px;text-align:center;font-variant-numeric:tabular-nums}
+.file-dropzone{border:1px dashed var(--btn-border);border-radius:4px;padding:16px;text-align:center;cursor:pointer;margin-top:6px;transition:border-color .15s}
+.file-dropzone:hover{border-color:var(--text)}
 .dl-input{width:100%;border:1px solid var(--border);border-radius:4px;padding:10px 12px;
   font-size:.85rem;font-family:inherit;background:var(--input-bg);color:var(--text);outline:none;margin-top:8px}
-.dl-input:focus{border-color:var(--text)}
+.dl-input:focus,.dl-textarea:focus{border-color:var(--text)}
+.dl-textarea{width:100%;border:1px solid var(--border);border-radius:4px;padding:10px 12px;
+  font-size:.85rem;font-family:monospace;background:var(--input-bg);color:var(--text);outline:none;
+  margin-top:8px;resize:vertical;min-height:80px;line-height:1.5}
 .search-wrap input::placeholder{color:var(--muted-light)}
 
 .empty{background:var(--surface);border:1px solid var(--border-light);padding:clamp(24px,4vw,48px) clamp(16px,3vw,32px);text-align:center}
@@ -223,11 +237,26 @@ function ActiveDownloads({ jobs }) {
 
 function GalleryCard({ g }) {
   const [imgFailed, setImgFailed] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const needsMeta = imgFailed || !g.title;
   const size = g.size ? '(' + (g.size / 1024 / 1024).toFixed(0) + ' MiB)' : '';
   const handleDelete = async () => {
     if (await window.confirmAction('Delete Gallery #' + g.gid, 'Remove gallery files and history. This cannot be undone.')) {
       if (await deleteGallery(g.gid)) window._reload();
     }
+  };
+  const handleRefreshMeta = async () => {
+    setRefreshing(true);
+    try {
+      const r = await fetch(API_BASE + '/refresh-metadata', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gid: g.gid }),
+      });
+      const d = await r.json();
+      if (d.success) { setImgFailed(false); window._reload(); }
+      else toast('Refresh failed: ' + (d.error || 'unknown'));
+    } catch (e) { toast('Network error: ' + e.message); }
+    finally { setRefreshing(false); }
   };
   return html`<div class="gallery-card">
     <div class="gallery-thumb-wrap">
@@ -244,6 +273,7 @@ function GalleryCard({ g }) {
       </div>
       <div class="gallery-actions">
         <a class="btn" href="${API_BASE}/galleries/${g.gid}/" target="_blank">Browse</a>
+        ${needsMeta ? html`<button class="btn btn-refreshmeta" onClick=${handleRefreshMeta} disabled=${refreshing}>${refreshing ? '…' : '↻'}</button>` : ''}
         <button class="btn btn-delete" onClick=${handleDelete}>Delete</button>
       </div>
     </div>
@@ -294,7 +324,7 @@ function GalleryLibrary({ galleries, search, total, page, perPage, onSearch, onP
   return html`<div class="section">
     <div class="section-header"><span class="section-title">Gallery Library</span><span class="section-count">${total} Galleries</span></div>
     <div class="search-wrap"><input type="text" placeholder="Search by GID or title…" value=${search} onInput=${e => onSearch(e.target.value)} /></div>
-    <div class="gallery-grid" ref=${gridRef}>${(filtered.length ? filtered : galleries).map(g => html`<${GalleryCard} g=${g} />`)}
+    <div class="gallery-grid" ref=${gridRef}>${(filtered.length ? filtered : galleries).map(g => html`<${GalleryCard} key=${g.gid} g=${g} />`)}
     ${total > perPage ? Array.from({ length: perPage - galleries.length }, (_, i) => html`<div class="gallery-card gallery-card--filler"></div>`) : ''}</div>
     <${Paginator} page=${page} perPage=${perPage} total=${total} onPage=${onPage} onPerPage=${onPerPage} />
   </div>`;
@@ -324,11 +354,15 @@ function App() {
   const [dlStatus, setDlStatus] = useState(null);
   const [dlLoading, setDlLoading] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [settings, setSettings] = useState({ ipb_member_id: '', ipb_pass_hash: '', igneous: '' });
+  const [showImport, setShowImport] = useState(false);
+  const [importUrl, setImportUrl] = useState('');
+  const [importFile, setImportFile] = useState(null);
+  const [importLoading, setImportLoading] = useState(false);
+  const [settings, setSettings] = useState({ ipb_member_id: '', ipb_pass_hash: '', igneous: '', maxConcurrent: 2 });
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [tick, setTick] = useState(0);
 
-  const anyModalOpen = dlStatus !== null || dlUrl !== null || showSettings;
+  const anyModalOpen = dlStatus !== null || dlUrl !== null || showSettings || showImport;
   useEffect(() => {
     if (anyModalOpen) {
       const sw = window.innerWidth - document.documentElement.clientWidth;
@@ -345,7 +379,7 @@ function App() {
   // Load settings on mount
   useEffect(() => {
     fetch(API_BASE + '/settings').then(r => r.json()).then(d => {
-      if (d && typeof d === 'object') setSettings({ ipb_member_id: d.ipb_member_id || '', ipb_pass_hash: d.ipb_pass_hash || '', igneous: d.igneous || '' });
+      if (d && typeof d === 'object') setSettings({ ipb_member_id: d.ipb_member_id || '', ipb_pass_hash: d.ipb_pass_hash || '', igneous: d.igneous || '', maxConcurrent: d.maxConcurrent || 2 });
     }).catch(() => {});
   }, []);
 
@@ -359,30 +393,57 @@ function App() {
   };
 
   const showDlModal = (url) => { setDlUrl(typeof url === 'string' ? url : ''); setDlStatus(null); };
+
+  const handleImport = async () => {
+    if (!importUrl.trim() || !importFile) { toast('Provide a gallery URL and select a ZIP file'); return; }
+    setImportLoading(true);
+    const form = new FormData();
+    form.append('url', importUrl.trim());
+    form.append('file', importFile);
+    try {
+      const r = await fetch(API_BASE + '/import', { method: 'POST', body: form });
+      const d = await r.json();
+      if (d.status === 'imported' || d.status === 'already_exists') {
+        toast('Imported #' + d.gid + (d.title ? ': ' + d.title : ''));
+        setShowImport(false); setImportUrl(''); setImportFile(null); load();
+      } else { toast('Import failed: ' + (d.error || 'unknown')); }
+    } catch (e) { toast('Error: ' + e.message); }
+    finally { setImportLoading(false); }
+  };
   const retryDl = async (gid, galleryUrl) => {
     if (!galleryUrl) { toast('No gallery URL for retry'); return; }
     showDlModal(galleryUrl);
   };
   const startDl = async () => {
-    const url = (dlUrl || '').trim(); if (!url) return;
-    const match = url.match(/https?:\/\/(?:e-hentai|exhentai)\.org\/g\/(\d+)\/([^\/]+)/);
-    if (!match) { setDlStatus({ success: false, title: 'Invalid URL', msg: 'URL must be like https://e-hentai.org/g/3939724/5d11cabac4/' }); return; }
-    const gid = match[1]; const galleryUrl = url.replace(/\/?(\?.*)?$/, '/');
+    const text = (dlUrl || '').trim(); if (!text) return;
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    const urls = [];
+    for (const line of lines) {
+      const match = line.match(/https?:\/\/(?:e-hentai|exhentai)\.org\/g\/(\d+)\/([^\/]+)/);
+      if (match) urls.push({ gid: match[1], galleryUrl: line.replace(/\/?(\?.*)?$/, '/') });
+    }
+    if (urls.length === 0) { setDlStatus({ success: false, title: 'No Valid URLs', msg: 'No valid E-Hentai gallery URLs found in input.' }); return; }
     setDlLoading(true);
-    try {
-      const r = await fetch(API_BASE + '/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gid, galleryUrl, dltype: 'res' }) });
-      const data = await r.json(); const s = data.status || 'error'; const p = data.progress ?? 0; const e = data.error || ''; const m = data.message || '';
-      let title, body;
-      if (s === 'completed') { title = 'Already Downloaded'; body = 'GID ' + gid + ' was already downloaded.'; }
-      else if (s === 'downloading') { title = 'Already Downloading'; body = 'GID ' + gid + ' is downloading (' + p + '%). ' + m; }
-      else if (s === 'queued') { title = 'Queued'; body = 'GID ' + gid + ' added to queue.'; }
-      else if (s === 'archiver_access' || s === 'extracting') { title = 'In Progress'; body = 'GID ' + gid + ' is ' + s + '. ' + m; }
-      else if (s === 'error') { title = 'Failed'; body = e || 'Unknown error'; }
-      else { title = 'Submitted'; body = 'GID ' + gid + ': ' + s; }
-      setDlStatus({ success: s !== 'error', title, msg: body });
-      if (s !== 'error') { setDlUrl(null); load(); }
-    } catch (e) { setDlStatus({ success: false, title: 'Network Error', msg: e.message }); }
-    finally { setDlLoading(false); }
+    let results = [];
+    for (let i = 0; i < urls.length; i++) {
+      const { gid, galleryUrl } = urls[i];
+      try {
+        const r = await fetch(API_BASE + '/download', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ gid, galleryUrl, dltype: 'res' }) });
+        const data = await r.json(); const s = data.status || 'error'; const p = data.progress ?? 0; const e = data.error || ''; const m = data.message || '';
+        let msg;
+        if (s === 'completed') msg = '✅ #' + gid + ' already downloaded';
+        else if (s === 'downloading') msg = '⬇ #' + gid + ' downloading (' + p + '%)' + (m ? ' ' + m : '');
+        else if (s === 'queued') msg = '⏳ #' + gid + ' queued';
+        else if (s === 'archiver_access' || s === 'extracting') msg = '🔄 #' + gid + ' ' + s + (m ? ' ' + m : '');
+        else if (s === 'error') msg = '❌ #' + gid + ' ' + (e || 'failed');
+        else msg = '#' + gid + ': ' + s;
+        results.push(msg);
+      } catch (e) { results.push('❌ #' + gid + ' network error'); }
+    }
+    setDlLoading(false); setDlUrl(null);
+    const successCount = results.filter(r => r.startsWith('✅') || r.startsWith('⏳') || r.startsWith('⬇') || r.startsWith('🔄')).length;
+    setDlStatus({ success: successCount > 0, title: successCount + '/' + urls.length + ' submitted', msg: results.join('\n') });
+    load();
   };
 
   const load = async () => {
@@ -422,6 +483,7 @@ function App() {
       <h1>Cache Server</h1>
       <div class="header-actions">
         <button class="refresh-btn" onClick=${() => showDlModal()}><span class="btn-label-wide">+ DOWNLOAD</span><span class="btn-label-narrow">+</span></button>
+        <button class="theme-btn" onClick=${() => setShowImport(true)} title="Import ZIP">📦</button>
         <button class="refresh-btn refresh-btn--with-time" onClick=${load}><span class="btn-label-wide">↻ REFRESH</span><span class="btn-label-narrow">↻</span><span class="refresh-time"> · just now</span></button>
         <div class="header-divider"></div>
         <button class="theme-btn" onClick=${() => setTheme(nextTheme[theme])} title="Theme: ${theme}">${themeIcon[theme]}</button>
@@ -436,7 +498,7 @@ function App() {
     <div class="modal-overlay ${dlStatus !== null ? 'active' : ''}" onClick=${closeOverlay(() => setDlStatus(null))}>
       <div class="modal">
         <h3>${dlStatus ? (dlStatus.success ? '✅' : '❌') : ''} ${dlStatus?.title || ''}</h3>
-        <p>${dlStatus?.msg || ''}</p>
+        <p style=${'white-space:pre-wrap;font-size:.8rem;line-height:1.6;max-height:300px;overflow-y:auto'}>${dlStatus?.msg || ''}</p>
         <div class="modal-actions">
           <button class="btn btn-primary" onClick=${() => setDlStatus(null)}>OK</button>
         </div>
@@ -446,10 +508,10 @@ function App() {
     <div class="modal-overlay ${dlUrl !== null ? 'active' : ''}" onClick=${closeOverlay(() => { setDlUrl(null); setDlStatus(null); })}>
       <div class="modal">
         <h3>Quick Download</h3>
-        <p>Paste an E-Hentai or ExHentai gallery URL:</p>
-        <input class="dl-input" value=${dlUrl ?? ''} onInput=${e => setDlUrl(e.target.value)}
-          placeholder="https://e-hentai.org/g/3939724/5d11cabac4/" disabled=${dlLoading} />
-        ${dlLoading ? html`<p style="font-size:.8rem;color:var(--muted);margin-top:8px">Submitting…</p>` : ''}
+        <p>Paste E-Hentai or ExHentai gallery URLs (one per line):</p>
+        <textarea class="dl-textarea" value=${dlUrl ?? ''} onInput=${e => setDlUrl(e.target.value)}
+          placeholder="https://e-hentai.org/g/3939724/5d11cabac4/&#10;https://exhentai.org/g/3939725/6ef2ce74a8/" disabled=${dlLoading} rows=${Math.max(3, (dlUrl || '').split('\n').length)}></textarea>
+        ${dlLoading ? html`<p style="font-size:.8rem;color:var(--muted);margin-top:8px">Processing…</p>` : ''}
         <div class="modal-actions" style="margin-top:16px">
           <button class="btn" onClick=${() => { setDlUrl(null); setDlStatus(null) }} disabled=${dlLoading}>Cancel</button>
           <button class="btn btn-primary" onClick=${startDl} disabled=${dlLoading || !(dlUrl || '').trim()}>Start Download</button>
@@ -468,11 +530,36 @@ function App() {
           <input class="dl-input" value=${settings.ipb_pass_hash} onInput=${e => setSettings(s => ({...s, ipb_pass_hash: e.target.value}))} placeholder="e.g. abcdef1234567890abcdef1234567890" disabled=${settingsLoading} type="password" />
           <label style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:4px">igneous</label>
           <input class="dl-input" value=${settings.igneous} onInput=${e => setSettings(s => ({...s, igneous: e.target.value}))} placeholder="e.g. abcdef123" disabled=${settingsLoading} />
+          <label style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:12px">Concurrent Downloads</label>
+          <div class="conc-control">
+            <button class="conc-btn" onClick=${() => setSettings(s => ({...s, maxConcurrent: Math.max(1, s.maxConcurrent - 1)}))} disabled=${settingsLoading || settings.maxConcurrent <= 1}>−</button>
+            <span class="conc-value">${settings.maxConcurrent}</span>
+            <button class="conc-btn" onClick=${() => setSettings(s => ({...s, maxConcurrent: Math.min(10, s.maxConcurrent + 1)}))} disabled=${settingsLoading || settings.maxConcurrent >= 10}>+</button>
+          </div>
         </div>
         ${settingsLoading ? html`<p style="font-size:.8rem;color:var(--muted);margin-top:12px">Saving…</p>` : ''}
-        <div class="modal-actions" style="margin-top:20px">
+        <div class="modal-actions" style="margin-top:16px">
           <button class="btn" onClick=${() => setShowSettings(false)} disabled=${settingsLoading}>Cancel</button>
           <button class="btn btn-primary" onClick=${saveSettings} disabled=${settingsLoading}>Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-overlay ${showImport ? 'active' : ''}" onClick=${closeOverlay(() => { setShowImport(false); setImportFile(null); setImportUrl(''); })}>
+      <div class="modal">
+        <h3>📦 Import ZIP</h3>
+        <p>Select a ZIP file of images and provide the gallery URL for metadata.</p>
+        <label style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:8px;display:block">Gallery URL</label>
+        <input class="dl-input" value=${importUrl} onInput=${e => setImportUrl(e.target.value)} placeholder="https://exhentai.org/g/3939724/5d11cabac4/" disabled=${importLoading} />
+        <label style="font-size:.75rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-top:12px;display:block">ZIP File</label>
+        <div class="file-dropzone" onClick=${e => e.currentTarget.querySelector('input').click()}>
+          <input type="file" accept=".zip" hidden onChange=${e => setImportFile(e.target.files[0])} />
+          ${importFile ? html`<span style="font-size:.8rem;color:var(--text)">${importFile.name}</span>` : html`<span style="font-size:.8rem;color:var(--muted)">Click to select ZIP file</span>`}
+        </div>
+        ${importLoading ? html`<p style="font-size:.8rem;color:var(--muted);margin-top:8px">Importing…</p>` : ''}
+        <div class="modal-actions" style="margin-top:16px">
+          <button class="btn" onClick=${() => { setShowImport(false); setImportFile(null); setImportUrl(''); }} disabled=${importLoading}>Cancel</button>
+          <button class="btn btn-primary" onClick=${handleImport} disabled=${importLoading || !importUrl.trim() || !importFile}>Import</button>
         </div>
       </div>
     </div>
