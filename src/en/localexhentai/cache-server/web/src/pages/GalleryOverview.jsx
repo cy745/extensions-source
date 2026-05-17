@@ -84,6 +84,7 @@ export default function GalleryOverview() {
           {loaded && <span className="header-count">{total} galleries</span>}
         </div>
         <div className="header-actions">
+          <button className="theme-btn" onClick={() => navigate(`/gallery/random/${Date.now()}`)} title="Random Preview">🎲</button>
           <ThemeBtn />
         </div>
       </header>

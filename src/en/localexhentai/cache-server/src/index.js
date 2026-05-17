@@ -754,6 +754,79 @@ app.get('/api/gallery-detail/:gid', (req, res) => {
   });
 });
 
+// ── Random preview ──
+// Seeded PRNG (mulberry32)
+function mulberry32(seed) {
+  let s = seed | 0;
+  return function() { s |= 0; s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+
+const ALL_IMAGES_CACHE_TTL = 30 * 60 * 1000;
+let allImagesCache = null;
+let allImagesCacheTime = 0;
+
+function getAllImages() {
+  if (allImagesCache && Date.now() - allImagesCacheTime < ALL_IMAGES_CACHE_TTL) return allImagesCache;
+  const galleries = store.listGalleries().filter(g => g.status === 'completed');
+  const all = [];
+  for (const g of galleries) {
+    const dir = path.join(GALLERIES_DIR, String(g.gid));
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (/\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f) && !f.startsWith('cover.')) {
+          all.push({ gid: g.gid, file: f, url: `/api/galleries/${g.gid}/${f}`, title: g.title || '' });
+        }
+      }
+    } catch {}
+  }
+  allImagesCache = all;
+  allImagesCacheTime = Date.now();
+  return all;
+}
+
+const shuffleCache = new Map();
+const SHUFFLE_CACHE_TTL = 5 * 60 * 1000;
+
+app.get('/api/random-preview/:seed', (req, res) => {
+  const seed = parseInt(req.params.seed, 10);
+  if (isNaN(seed)) return res.status(400).json({ error: 'Invalid seed' });
+  const page = Math.max(1, parseInt(req.query.page || '1', 10));
+  const perPage = Math.min(120, Math.max(1, parseInt(req.query.perPage || '60', 10)));
+
+  const allImages = getAllImages();
+  const total = allImages.length;
+  if (total === 0) return res.json({ images: [], total: 0, page, perPage, hasNext: false, seed });
+
+  // Cached shuffled indices
+  const cacheKey = String(seed);
+  let entry = shuffleCache.get(cacheKey);
+  if (!entry || Date.now() - entry.time > SHUFFLE_CACHE_TTL) {
+    const rng = mulberry32(seed);
+    const indices = Array.from({ length: total }, (_, i) => i);
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      [indices[i], indices[j]] = [indices[j], indices[i]];
+    }
+    entry = { indices, time: Date.now() };
+    shuffleCache.set(cacheKey, entry);
+  }
+
+  const start = (page - 1) * perPage;
+  const pageIndices = entry.indices.slice(start, start + perPage);
+
+  const images = pageIndices.map(i => {
+    const img = allImages[i];
+    let w = 0, h = 0;
+    try {
+      const dim = imageSize(fs.readFileSync(path.join(GALLERIES_DIR, String(img.gid), img.file)));
+      w = dim.width; h = dim.height;
+    } catch {}
+    return { url: img.url, w, h };
+  });
+
+  res.json({ images, total, page, perPage, hasNext: start + perPage < total, seed });
+});
+
 // SPA fallback — all non-API, non-proxy routes serve the React app
 if (fs.existsSync(REACT_DIST)) {
   app.use((req, res, next) => {
