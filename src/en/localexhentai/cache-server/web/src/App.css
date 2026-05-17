@@ -225,6 +225,26 @@
 .w-item[style] img{position:absolute;inset:0;height:100%;object-fit:cover}
 .w-item[style]{overflow:hidden}
 .w-item:hover img{transform:scale(1.03)}
+.w-item--random .w-item-overlay{position:absolute;bottom:0;left:0;right:0;
+  background:linear-gradient(transparent,rgba(0,0,0,.7));padding:clamp(6px,1vw,12px) clamp(4px,.8vw,10px);
+  opacity:0;transition:opacity .2s;pointer-events:none}
+.w-item--random:hover .w-item-overlay{opacity:1;pointer-events:auto}
+.w-item-title{font-size:clamp(.6rem,.8vw,.75rem);color:#fff;font-weight:500;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;
+  text-decoration:none;transition:text-decoration .15s;cursor:pointer}
+.w-item-title:hover{text-decoration:underline}
+.w-item.focus-flash{animation:focusZoom .8s cubic-bezier(.25,.46,.45,.94), focusGlow 2.5s ease-out .5s}
+@keyframes focusZoom{
+  0%{transform:scale(1)}
+  50%{transform:scale(1.035)}
+  100%{transform:scale(1)}
+}
+@keyframes focusGlow{
+  0%{box-shadow:0 0 0 3px rgba(255,255,255,.8),0 0 25px rgba(255,255,200,.4)}
+  20%{box-shadow:0 0 0 3px rgba(255,255,255,.7),0 0 30px rgba(255,255,200,.25)}
+  50%{box-shadow:0 0 0 2px rgba(255,255,255,.4),0 0 15px rgba(255,255,200,.1)}
+  100%{box-shadow:none}
+}
 
 /* ── Load More ── */
 .load-more-wrap{display:flex;justify-content:center;padding:clamp(20px,3vw,40px) 0}

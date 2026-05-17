@@ -4,27 +4,46 @@ import { getGalleryDetail } from '../api';
 import Lightbox from '../components/Lightbox';
 import ThemeBtn from '../components/ThemeBtn';
 
+// Module-level cache — survives unmount/remount across route changes
+const previewCache = {};
+let savedScrollY = 0;
+
+function goToGallery(gid, filename) {
+  savedScrollY = window.scrollY;
+  window.location.href = `/gallery/${gid}?focus=${encodeURIComponent(filename)}`;
+}
+
 export default function RandomPreview() {
   const { seed } = useParams();
-  const navigate = useNavigate();
+  const nav = useNavigate();
 
-  const [images, setImages] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [hasNext, setHasNext] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const cache = previewCache[seed];
+
+  const [images, setImages] = useState(cache?.images || []);
+  const [total, setTotal] = useState(cache?.total || 0);
+  const [hasNext, setHasNext] = useState(cache?.hasNext ?? true);
+  const [loaded, setLoaded] = useState(!!cache);
   const [loadingMore, setLoadingMore] = useState(false);
   const [lbIndex, setLbIndex] = useState(-1);
 
-  const pageRef = useRef(1);
+  const pageRef = useRef(cache?.page || 1);
   const sentinelRef = useRef(null);
+
+  // Restore scroll position when returning from gallery detail
+  useEffect(() => {
+    if (savedScrollY > 0) {
+      requestAnimationFrame(() => { window.scrollTo(0, savedScrollY); savedScrollY = 0; });
+    }
+  }, []);
 
   // Load first page
   useEffect(() => {
+    if (cache) return;
     (async () => {
-      setLoaded(false);
       pageRef.current = 1;
       try {
         const d = await fetch(`/api/random-preview/${seed}?page=1&perPage=60`).then(r => r.json());
+        previewCache[seed] = { images: d.images, total: d.total, hasNext: d.hasNext, page: d.page };
         setImages(d.images);
         setTotal(d.total);
         setHasNext(d.hasNext);
@@ -52,7 +71,9 @@ export default function RandomPreview() {
     setLoadingMore(true);
     try {
       const d = await fetch(`/api/random-preview/${seed}?page=${pageRef.current + 1}&perPage=60`).then(r => r.json());
-      setImages(prev => [...prev, ...d.images]);
+      const merged = [...images, ...d.images];
+      previewCache[seed] = { images: merged, total: d.total, hasNext: d.hasNext, page: d.page };
+      setImages(merged);
       setTotal(d.total);
       setHasNext(d.hasNext);
       pageRef.current = d.page;
@@ -116,10 +137,16 @@ export default function RandomPreview() {
             {columns.map((colImgs, ci) => (
               <div className="waterfall-col" key={ci}>
                 {colImgs.map(img => (
-                  <div className="w-item" key={img.url} onClick={() => openLb(img.globalIdx)}
+                  <div className="w-item w-item--random" key={img.url} onClick={() => openLb(img.globalIdx)}
                     style={img.w && img.h ? { aspectRatio: img.w / img.h } : undefined}>
                     <img src={img.url} alt="" loading="lazy"
                       onLoad={e => e.target.classList.add('loaded')} />
+                    <div className="w-item-overlay">
+                      <span className="w-item-title" onClick={e => { e.stopPropagation(); goToGallery(img.gid, img.url.split('/').pop()); }}
+                        title="Click to view gallery">
+                        {img.title || '#' + img.gid}
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>

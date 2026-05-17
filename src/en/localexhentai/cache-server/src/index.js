@@ -754,6 +754,31 @@ app.get('/api/gallery-detail/:gid', (req, res) => {
   });
 });
 
+// Gallery image position — find which page an image is on
+app.get('/api/gallery-image-position/:gid', (req, res) => {
+  const gid = req.params.gid;
+  const filename = req.query.filename;
+  if (!filename) return res.status(400).json({ error: 'filename required' });
+
+  const dir = path.join(GALLERIES_DIR, String(gid));
+  let files = [];
+  try {
+    files = fs.readdirSync(dir)
+      .filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f) && !f.startsWith('cover.'))
+      .sort((a, b) => {
+        const na = parseInt(a.match(/(\d+)/)?.[1] || '0', 10);
+        const nb = parseInt(b.match(/(\d+)/)?.[1] || '0', 10);
+        return na - nb;
+      });
+  } catch {}
+
+  const idx = files.indexOf(filename);
+  if (idx === -1) return res.status(404).json({ error: 'File not found' });
+
+  const perPage = 60;
+  res.json({ page: Math.floor(idx / perPage) + 1, indexInPage: idx % perPage, total: files.length });
+});
+
 // ── Random preview ──
 // Seeded PRNG (mulberry32)
 function mulberry32(seed) {
@@ -821,7 +846,7 @@ app.get('/api/random-preview/:seed', (req, res) => {
       const dim = imageSize(fs.readFileSync(path.join(GALLERIES_DIR, String(img.gid), img.file)));
       w = dim.width; h = dim.height;
     } catch {}
-    return { url: img.url, w, h };
+    return { url: img.url, w, h, title: img.title, gid: img.gid };
   });
 
   res.json({ images, total, page, perPage, hasNext: start + perPage < total, seed });

@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { getGalleryDetail } from '../api';
 import Lightbox from '../components/Lightbox';
 import ThemeBtn from '../components/ThemeBtn';
 
 export default function GalleryDetail() {
   const { gid } = useParams();
+  const [searchParams] = useSearchParams();
+  const focusFile = searchParams.get('focus');
+  const focusRef = useRef(null);
 
   const [images, setImages] = useState([]);
   const [title, setTitle] = useState('');
@@ -51,47 +54,127 @@ export default function GalleryDetail() {
 
   const waterfallRef = useRef(null);
 
-  // Distribute images into columns — each new image goes to the shortest column
-  const columns = useMemo(() => {
-    // Compute gap matching CSS: clamp(3px, 0.5vw, 8px)
+  // Column state — updated incrementally so existing items keep their DOM
+  const [columns, setColumns] = useState([]);
+  const colHeightsRef = useRef([]);
+  const colsRef = useRef([]);
+  const gapRef = useRef(0);
+  const numColsRef = useRef(numCols);
+  numColsRef.current = numCols;
+
+  // Compute gap and column width
+  function getLayout() {
     const gap = Math.min(8, Math.max(3, window.innerWidth * 0.005));
-    const containerWidth = waterfallRef.current?.clientWidth || (window.innerWidth - 32 * 2);
-    const colWidth = (containerWidth - (numCols - 1) * gap) / numCols;
+    const cw = waterfallRef.current?.clientWidth || (window.innerWidth - 32 * 2);
+    return { gap, colWidth: (cw - (numCols - 1) * gap) / numCols };
+  }
 
-    const cols = Array.from({ length: numCols }, () => []);
-    const colHeights = new Array(numCols).fill(0);
-    const DEFAULT_RATIO = 4 / 3; // fallback when dimensions unknown
-
-    images.forEach((img, i) => {
+  // Distribute a batch of images to shortest columns, returns [newCols, newHeights]
+  function pushToCols(items, existingCols, existingHeights) {
+    const { gap, colWidth } = getLayout();
+    const cols = existingCols || Array.from({ length: numCols }, () => []);
+    const heights = existingHeights || new Array(numCols).fill(0);
+    const DEFAULT_RATIO = 4 / 3;
+    items.forEach((img, i) => {
       const ratio = img.w && img.h ? img.w / img.h : DEFAULT_RATIO;
-      const itemH = colWidth / ratio + gap; // height including bottom gap
-      // Find shortest column
+      const itemH = colWidth / ratio + gap;
       let minIdx = 0;
-      for (let c = 1; c < numCols; c++) {
-        if (colHeights[c] < colHeights[minIdx]) minIdx = c;
-      }
-      colHeights[minIdx] += itemH;
-      cols[minIdx].push({ ...img, globalIdx: i });
+      for (let c = 1; c < numCols; c++) { if (heights[c] < heights[minIdx]) minIdx = c; }
+      heights[minIdx] += itemH;
+      cols[minIdx].push({ ...img, globalIdx: img.globalIdx ?? i });
     });
-    return cols;
-  }, [images, numCols]);
+    return { cols, heights };
+  }
+
+  // When images change completely (initial load), rebuild columns
+  function rebuildCols(allImages) {
+    const { cols, heights } = pushToCols(allImages);
+    colsRef.current = cols;
+    colHeightsRef.current = heights;
+    gapRef.current = getLayout().gap;
+    setColumns(cols);
+  }
+
+  // When new images are loaded (loadMore), only append to shortest columns
+  function appendCols(newImages) {
+    const startIdx = columns.flat().length;
+    const items = newImages.map((img, i) => ({ ...img, globalIdx: startIdx + i }));
+    const { cols, heights } = pushToCols(items, colsRef.current, colHeightsRef.current);
+    colsRef.current = cols;
+    colHeightsRef.current = heights;
+    setColumns([...cols]); // trigger re-render with same column refs
+  }
+
+  // Rebuild on numCols change (window resize)
+  useEffect(() => {
+    if (columns.length > 0 && columns.flat().length > 0) {
+      const all = columns.flat().sort((a, b) => a.globalIdx - b.globalIdx);
+      rebuildCols(all);
+    }
+  }, [numCols]);
 
   useEffect(() => {
     setLoaded(false);
     pageRef.current = 1;
     (async () => {
+      // If focus param, find which page and load up to it
+      let targetPage = 1;
+      let focusGlobalIdx = -1;
+      if (focusFile) {
+        try {
+          const pos = await fetch(`/api/gallery-image-position/${gid}?filename=${encodeURIComponent(focusFile)}`).then(r => r.json());
+          targetPage = pos.page;
+          focusGlobalIdx = (pos.page - 1) * 60 + pos.indexInPage;
+        } catch {}
+      }
+
       try {
-        const d = await getGalleryDetail(gid, 1);
-        setImages(d.images);
-        setTitle(d.title);
-        setCoverUrl(d.coverUrl);
-        setTotal(d.total);
-        setHasNext(d.hasNext);
-        pageRef.current = d.page;
+        let all = [];
+        const first = await getGalleryDetail(gid, 1);
+        all = first.images;
+        setTitle(first.title);
+        setCoverUrl(first.coverUrl);
+        setTotal(first.total);
+        setHasNext(first.hasNext);
+        pageRef.current = first.page;
+
+        // Load subsequent pages if needed
+        for (let p = 2; p <= targetPage; p++) {
+          const d = await getGalleryDetail(gid, p);
+          all = [...all, ...d.images];
+          setHasNext(d.hasNext);
+          pageRef.current = d.page;
+        }
+        setTotal(first.total); // total stays the same
+
+        setImages(all);
+        rebuildCols(all);
       } catch (e) {
         console.error('Load failed:', e);
       }
       setLoaded(true);
+
+      // Scroll to focused image, flash once element is on screen
+      if (focusGlobalIdx >= 0) {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            const el = document.querySelector(`[data-global="${focusGlobalIdx}"]`);
+            if (el) {
+              el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+              const obs = new IntersectionObserver((entries) => {
+                if (entries[0].isIntersecting) {
+                  obs.disconnect();
+                  setTimeout(() => {
+                    el.classList.add('focus-flash');
+                    setTimeout(() => el.classList.remove('focus-flash'), 3000);
+                  }, 300);
+                }
+              }, { threshold: 0.3 });
+              obs.observe(el);
+            }
+          });
+        });
+      }
     })();
   }, [gid]);
 
@@ -108,10 +191,13 @@ export default function GalleryDetail() {
 
   const loadMore = async () => {
     if (!hasNext || loadingMore) return;
+    // Remove focus highlight to avoid re-render flash
+    document.querySelectorAll('.focus-flash').forEach(el => el.classList.remove('focus-flash'));
     setLoadingMore(true);
     try {
       const d = await getGalleryDetail(gid, pageRef.current + 1);
       setImages(prev => [...prev, ...d.images]);
+      appendCols(d.images);
       setTotal(d.total);
       setHasNext(d.hasNext);
       pageRef.current = d.page;
@@ -165,7 +251,7 @@ export default function GalleryDetail() {
             {columns.map((colImgs, ci) => (
               <div className="waterfall-col" key={ci}>
                 {colImgs.map(img => (
-                  <div className="w-item" key={img.url} onClick={() => openLb(img.globalIdx)}
+                  <div className="w-item" key={img.url} data-global={img.globalIdx} onClick={() => openLb(img.globalIdx)}
                     style={img.w && img.h ? { aspectRatio: img.w / img.h } : undefined}>
                     <img src={img.url} alt="" loading="lazy"
                       onLoad={e => e.target.classList.add('loaded')} />
