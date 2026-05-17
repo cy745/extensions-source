@@ -3,6 +3,7 @@ import { useParams, useSearchParams } from 'react-router-dom';
 import { getGalleryDetail } from '../api';
 import Lightbox from '../components/Lightbox';
 import ScrollPreview from '../components/ScrollPreview';
+import AutoScroll from '../components/AutoScroll';
 import ThemeBtn from '../components/ThemeBtn';
 import screenfull from 'screenfull';
 
@@ -363,6 +364,7 @@ export default function GalleryDetail() {
       )}
 
       {loaded && images.length > 0 && <ScrollPreview images={images} />}
+      {loaded && <AutoScroll lightboxOpen={lbIndex >= 0} />}
 
       {lbIndex >= 0 && lbIndex < images.length && (
         <Lightbox

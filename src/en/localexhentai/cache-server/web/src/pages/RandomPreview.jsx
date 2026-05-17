@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { getGalleryDetail } from '../api';
 import Lightbox from '../components/Lightbox';
+import AutoScroll from '../components/AutoScroll';
 import ThemeBtn from '../components/ThemeBtn';
 import screenfull from 'screenfull';
 
@@ -267,9 +268,10 @@ export default function RandomPreview() {
         </>
       )}
 
-      {lbIndex >= 0 && lbIndex < images.length && (
+      {lbIndex >= 0 && lbIndex < images.length && <>
         <Lightbox images={images} initialIndex={lbIndex} onClose={closeLb} onLoadMore={loadMore} loadingMore={loadingMore} isFs={isFs} onIndexChange={idx => lbIdxRef.current = idx} />
-      )}
+      </>}
+      <AutoScroll lightboxOpen={lbIndex >= 0} />
     </div>
   );
 }
