@@ -8,6 +8,18 @@ const store = require('./store');
 
 const CACHE_DIR = process.env.CACHE_DIR || '/app/cache';
 const GALLERIES_DIR = path.join(CACHE_DIR, 'galleries');
+const SETTINGS_PATH = path.join(CACHE_DIR, 'settings.json');
+
+function buildDefaultCookies() {
+  try {
+    const s = JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf8'));
+    const parts = [];
+    if (s.ipb_member_id) parts.push(`ipb_member_id=${s.ipb_member_id}`);
+    if (s.ipb_pass_hash) parts.push(`ipb_pass_hash=${s.ipb_pass_hash}`);
+    if (s.igneous) parts.push(`igneous=${s.igneous}`);
+    return parts.join('; ');
+  } catch { return ''; }
+}
 
 // ---------------------------------------------------------------------------
 // DNS-over-HTTPS resolver (same as index.js)
@@ -420,7 +432,7 @@ function enqueue(gid, galleryUrl, dltype, cookies) {
 
   const job = { gid, galleryUrl, dltype: dltype || 'res', cookies: cookies || '', status: 'queued', progress: 0, createdAt: new Date().toISOString() };
   queue.push(job);
-  store.setJob(gid, { status: 'queued', progress: 0, galleryUrl, dltype: dltype || 'res' });
+  store.setJob(gid, { status: 'queued', progress: 0, galleryUrl, dltype: dltype || 'res', cookies: cookies || '' });
 
   processQueue();
   return { status: 'queued', gid, progress: 0, message: 'Queued for download' };
@@ -521,6 +533,35 @@ async function executeJob(job) {
     processQueue();
   }
 }
+
+// Reload persisted queued jobs on startup (survives container restart)
+function initQueue() {
+  const jobs = store.listJobs();
+  let restored = 0;
+  for (const job of jobs) {
+    if (job.status === 'queued' || job.status === 'downloading' || job.status === 'archiver_access' || job.status === 'extracting') {
+      // Reset status to queued so it can be picked up
+      if (job.status !== 'queued') {
+        store.setJob(job.gid, { status: 'queued', progress: 0, message: 'Restored after restart' });
+      }
+      queue.push({ gid: job.gid, galleryUrl: job.galleryUrl, dltype: job.dltype || 'res', cookies: job.cookies || '', status: 'queued', progress: 0 });
+      restored++;
+  }
+  }
+  // Build default cookies from settings for restored jobs (cookies not persisted)
+  const defaultCookies = buildDefaultCookies();
+  for (const item of queue) {
+    if (!item.cookies) item.cookies = defaultCookies;
+  }
+  if (restored > 0) {
+    const suffix = jobs.length > restored ? ' (out of ' + jobs.length + ' total)' : '';
+    console.log('[dl] Restored ' + restored + suffix + ' jobs to queue');
+    processQueue();
+  }
+}
+
+// Call on module load
+initQueue();
 
 // ---------------------------------------------------------------------------
 // Public API
