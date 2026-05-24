@@ -112,7 +112,28 @@
 .btn-delete:hover{border-color:#e74c3c;background:rgba(231,76,60,.1)}
 .btn-refreshmeta{border-color:transparent;color:#3498db}
 .btn-refreshmeta:hover{border-color:#3498db;background:rgba(52,152,219,.1)}
-.btn-retry{font-size:.65rem;padding:2px 10px;flex-shrink:0}
+.btn-sm{font-size:.65rem;padding:2px 10px;flex-shrink:0}
+.sort-select{border:1px solid var(--btn-border);border-radius:4px;padding:3px 8px;
+  font-size:.68rem;font-family:inherit;background:var(--input-bg);color:var(--text);cursor:pointer;
+  outline:none;white-space:nowrap;transition:border-color .15s}
+.sort-select:hover,.sort-select:focus{border-color:var(--text)}
+/* Custom checkbox */
+.log-cb-wrap{position:relative;display:flex;align-items:center;justify-content:center;
+  width:20px;height:20px;cursor:pointer;flex-shrink:0}
+.log-cb{position:absolute;opacity:0;width:100%;height:100%;cursor:pointer;margin:0;z-index:1}
+.log-cb-mark{width:16px;height:16px;border:1.5px solid var(--btn-border);border-radius:3px;
+  transition:border-color .15s;background:var(--input-bg);pointer-events:none;position:relative;flex-shrink:0}
+.log-cb:hover + .log-cb-mark{border-color:var(--text)}
+.log-cb:checked + .log-cb-mark{background:var(--text);border-color:var(--text)}
+.log-cb:checked + .log-cb-mark::after{content:'';position:absolute;inset:0;margin:auto;
+  width:5px;height:8px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
+.log-entry.selected{background:var(--divider);box-shadow:inset 2px 0 0 var(--text)}
+.log-entry{transition:background .15s}
+/* Batch toolbar */
+.batch-actions{display:flex;align-items:center;gap:8px;padding:8px 0 6px;flex-wrap:wrap;border-bottom:1px solid var(--border-light);margin-bottom:6px}
+.batch-count{font-size:.7rem;font-weight:600;color:var(--text-secondary);min-width:1.5rem;text-align:center;font-variant-numeric:tabular-nums}
+.batch-divider{width:1px;height:16px;background:var(--border);flex-shrink:0}
+.btn.disabled{opacity:.3;cursor:default;pointer-events:none}
 
 /* ── Search ── */
 .search-wrap{position:relative;margin-bottom:12px}
@@ -149,7 +170,7 @@
 /* ── Log ── */
 .log{display:flex;flex-direction:column;gap:1px;background:var(--border-light);border:1px solid var(--border-light);max-height:360px;overflow-y:auto}
 .log-entry{background:var(--surface);padding:clamp(8px,1vw,14px) clamp(12px,1.5vw,20px);display:flex;
-  flex-wrap:wrap;align-items:baseline;gap:8px}
+  flex-wrap:wrap;align-items:center;gap:8px;min-height:clamp(36px,5vw,48px)}
 .log-time{font-size:.65rem;color:var(--muted-light);font-weight:500;font-variant-numeric:tabular-nums;min-width:130px}
 .log-gid{font-size:.75rem;font-weight:600;color:var(--text-secondary);min-width:80px}
 .log-msg{font-size:.75rem;color:var(--muted);flex:1}

@@ -464,6 +464,15 @@ app.post('/api/delete', (req, res) => {
   console.log(`[api] Deleted gallery ${gid}`);
 });
 
+// Delete job record only (for activity log)
+app.post('/api/clear-job', (req, res) => {
+  const gid = req.query.gid;
+  if (!gid) return res.status(400).json({ error: 'gid required' });
+  store.deleteJob(gid);
+  res.json({ status: 'cleared', gid });
+  console.log(`[api] Cleared job ${gid}`);
+});
+
 // Refresh metadata + cover for a gallery
 app.post('/api/refresh-metadata', async (req, res) => {
   const { gid } = req.body || {};

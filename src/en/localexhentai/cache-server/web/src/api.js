@@ -63,3 +63,7 @@ export function getGalleryDetail(gid, page = 1, perPage = 60) {
 export function getDownloadStatus(gid) {
   return fetchJSON(`/status?gid=${gid}`);
 }
+
+export function clearJob(gid) {
+  return fetchJSON('/clear-job?gid=' + gid, { method: 'POST' });
+}

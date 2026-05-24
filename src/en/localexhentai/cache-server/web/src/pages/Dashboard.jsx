@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
 import ThemeBtn from '../components/ThemeBtn';
 
@@ -155,6 +155,39 @@ export default function Dashboard() {
     }
     prevAnyModal.current = anyOpen;
   }, [showDl, dlResult, showSettings, showImport]);
+
+  // Activity log
+  const [logSort, setLogSort] = useState('time-desc');
+  const [selectedLog, setSelectedLog] = useState(new Set());
+  const sortedFailed = useMemo(() => {
+    if (!data?.failed) return [];
+    const items = [...data.failed];
+    switch (logSort) {
+      case 'time-asc': items.sort((a, b) => new Date(a.failedAt || 0) - new Date(b.failedAt || 0)); break;
+      case 'gid-asc': items.sort((a, b) => parseInt(a.gid) - parseInt(b.gid)); break;
+      case 'gid-desc': items.sort((a, b) => parseInt(b.gid) - parseInt(a.gid)); break;
+      default: items.sort((a, b) => new Date(b.failedAt || 0) - new Date(a.failedAt || 0)); break;
+    }
+    return items;
+  }, [data?.failed, logSort]);
+
+  const batchRetry = async () => {
+    const items = data?.failed?.filter(j => selectedLog.has(j.gid)) || [];
+    if (!items.length) return;
+    setSelectedLog(new Set());
+    const urls = items.filter(j => j.galleryUrl).map(j => j.galleryUrl).join('\n');
+    if (urls) { showDlModal(urls); }
+  };
+  const batchDelete = async () => {
+    const items = data?.failed?.filter(j => selectedLog.has(j.gid)) || [];
+    if (!items.length) return;
+    for (const j of items) {
+      try { await api.clearJob(j.gid); } catch {}
+    }
+    toast('Cleared ' + items.length + ' entries');
+    setSelectedLog(new Set());
+    load();
+  };
 
   // Refresh tick
   const [tick, setTick] = useState(0);
@@ -429,18 +462,51 @@ export default function Dashboard() {
       <div className="section">
         <div className="section-header">
           <span className="section-title">Activity Log</span>
-          {failed?.length > 0 && <span className="section-count">{failed.length} failure{failed.length !== 1 ? 's' : ''}</span>}
+          {failed?.length > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span className="section-count">{failed.length} failure{failed.length !== 1 ? 's' : ''}</span>
+              <select className="sort-select" value={logSort} onChange={e => setLogSort(e.target.value)}>
+                <option value="time-desc">Newest first</option>
+                <option value="time-asc">Oldest first</option>
+                <option value="gid-asc">GID ↑</option>
+                <option value="gid-desc">GID ↓</option>
+              </select>
+            </div>
+          )}
         </div>
+        {failed?.length > 0 && (
+          <div className="batch-actions">
+            <label className="log-cb-wrap" title="Select all">
+              <input type="checkbox" className="log-cb all-cb"
+                checked={selectedLog.size === failed.length && failed.length > 0}
+                ref={el => { if (el) el.indeterminate = selectedLog.size > 0 && selectedLog.size < failed.length; }}
+                onChange={e => setSelectedLog(e.target.checked ? new Set(failed.map(j => j.gid)) : new Set())} />
+              <span className="log-cb-mark" />
+            </label>
+            <span className="batch-count">{selectedLog.size}</span>
+            <div className="batch-divider" />
+            <button className={`btn${selectedLog.size > 0 ? '' : ' disabled'}`} onClick={batchRetry}
+              disabled={selectedLog.size === 0}>↻ Retry All</button>
+            <button className={`btn${selectedLog.size > 0 ? '' : ' disabled'}`} onClick={batchDelete}
+              disabled={selectedLog.size === 0}>Delete</button>
+          </div>
+        )}
         {!failed?.length ? (
           <div className="empty"><div className="empty-icon">○</div><div className="empty-text">No failures</div></div>
         ) : (
           <div className="log">
-            {failed.slice().reverse().map(j => (
-              <div className="log-entry" key={j.gid + (j.failedAt || '')}>
+            {sortedFailed.map(j => (
+              <div className={`log-entry${selectedLog.has(j.gid) ? ' selected' : ''}`} key={j.gid + (j.failedAt || '')}>
+                <label className="log-cb-wrap">
+                  <input type="checkbox" className="log-cb"
+                    checked={selectedLog.has(j.gid)}
+                    onChange={e => { const s = new Set(selectedLog); e.target.checked ? s.add(j.gid) : s.delete(j.gid); setSelectedLog(s); }} />
+                  <span className="log-cb-mark" />
+                </label>
                 <span className="log-time">{j.failedAt ? new Date(j.failedAt).toLocaleString() : ''}</span>
-                <span className="log-gid">#{j.gid}</span>
+                <a className="log-gid" href={j.galleryUrl || `https://exhentai.org/g/${j.gid}/`} target="_blank" rel="noreferrer">#{j.gid}</a>
                 <span className="log-msg error" style={{ flex: 1 }}>{j.error || 'Unknown'}</span>
-                <button className="btn btn-retry" onClick={() => retryDl(j.gid, j.galleryUrl)}>↻ Retry</button>
+                <button className="btn btn-sm" onClick={() => retryDl(j.gid, j.galleryUrl)}>↻ Retry</button>
               </div>
             ))}
           </div>
