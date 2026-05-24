@@ -44,22 +44,82 @@ extensions-source/
 
 ---
 
-## Development Workflow & Conventions
+## ⚠️ Critical Development Workflow
 
-### Build & Deploy
+**Golden rule**: After ANY code modification (frontend JSX/CSS or backend JS), you MUST rebuild and restart Docker before the user can test. The development server is NOT hot-reload capable — code changes are only reflected after a full Docker rebuild.
+
+### Full Rebuild Cycle (one command)
+
 ```bash
-# Build React frontend
-cd cache-server/web && npm run build
-
-# Build & start Docker
-cd cache-server && docker compose down && docker compose build && docker compose up -d
-
-# For clean rebuild (no cache):
-docker compose build --no-cache
-
-# After code changes: rebuild React → rebuild Docker → test
-npm --prefix web run build && docker compose down && docker compose build && docker compose up -d
+cd ~/extensions-source/src/en/localexhentai/cache-server && \
+  npm --prefix web run build && \
+  docker compose down && \
+  docker compose build && \
+  docker compose up -d
 ```
+
+### Step-by-Step (if you need to debug a step)
+
+```bash
+# 1. Build React frontend (compile JSX/CSS → dist/)
+cd ~/extensions-source/src/en/localexhentai/cache-server/web
+npm run build
+#    Expected: "built in Xms" — no errors
+
+# 2. Stop old container
+cd ~/extensions-source/src/en/localexhentai/cache-server
+docker compose down
+
+# 3. Build new Docker image (copies web/dist/ + server src/)
+docker compose build
+
+# 4. Start fresh container
+docker compose up -d
+
+# 5. Verify it's running
+sleep 3 && docker logs ehentai-cache --tail 5
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/
+```
+
+### Clean Rebuild (no layer cache — use when dependencies change)
+
+```bash
+docker compose build --no-cache
+```
+
+### Quick Server-Only Restart (no frontend changes)
+
+```bash
+docker compose down && docker compose build && docker compose up -d
+```
+
+### ⚠️ Common Mistakes to Avoid
+
+| Mistake | Why It's Wrong |
+|---------|----------------|
+| Editing code but not rebuilding Docker | Changes not reflected — user tests stale code |
+| Only running `npm run build` without `docker compose build` | New frontend built but not in container |
+| Using `docker restart ehentai-cache` instead of rebuild | Container restarts with OLD image; only env/volume changes apply |
+| Editing `web/src/` but running server-only restart | Frontend changes NOT in container |
+| Not checking Docker logs after restart | Silent errors (e.g., syntax error from bad JS) cause container crash-loop |
+
+### Verification Checklist (always do after rebuild)
+
+```bash
+# 1. Check container is running
+docker ps --filter name=ehentai-cache --format "{{.Status}}"
+
+# 2. Check logs for errors
+docker logs ehentai-cache --tail 10
+
+# 3. Test key endpoints
+curl -s -o /dev/null -w "Dashboard: %{http_code}\n" http://localhost:3000/
+curl -s -o /dev/null -w "Gallery: %{http_code}\n" http://localhost:3000/gallery
+```
+
+If the container exits immediately, use `docker logs ehentai-cache` to find the error (usually a JS syntax error). Fix → rebuild → retry.
+
+---
 
 ### Design Conventions
 - **Single CSS file** (`App.css`) — no CSS modules or Tailwind
