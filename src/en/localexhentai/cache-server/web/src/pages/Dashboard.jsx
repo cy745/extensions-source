@@ -175,8 +175,15 @@ export default function Dashboard() {
     const items = data?.failed?.filter(j => selectedLog.has(j.gid)) || [];
     if (!items.length) return;
     setSelectedLog(new Set());
-    const urls = items.filter(j => j.galleryUrl).map(j => j.galleryUrl).join('\n');
-    if (urls) { showDlModal(urls); }
+    let ok = 0, fail = 0;
+    for (const j of items) {
+      try {
+        const r = await api.retryJob(j.gid);
+        ok++;
+      } catch (e) { fail++; }
+    }
+    toast(`Retry: ${ok} submitted` + (fail ? `, ${fail} failed` : ''));
+    load();
   };
   const batchDelete = async () => {
     const items = data?.failed?.filter(j => selectedLog.has(j.gid)) || [];
@@ -193,16 +200,25 @@ export default function Dashboard() {
   const [tick, setTick] = useState(0);
   const lastRefresh = useRef(Date.now());
 
+  // Debounce search — don't send API request on every keystroke
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+  // Reset to page 1 when user types a new search
+  useEffect(() => { if (search !== debouncedSearch) setPage(1); }, [search]);
+
   const load = useCallback(async () => {
     try {
-      const d = await api.getDashboard(page, perPage);
+      const d = await api.getDashboard(page, perPage, debouncedSearch);
       setData(d);
       lastRefresh.current = Date.now();
       setError(null);
     } catch (e) {
       setError(e.message);
     }
-  }, [page, perPage]);
+  }, [page, perPage, debouncedSearch]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { const id = setInterval(load, 5000); return () => clearInterval(id); }, [load]);
@@ -322,9 +338,13 @@ export default function Dashboard() {
     setImportLoading(false);
   };
 
-  const retryDl = (gid, galleryUrl) => {
+  const retryDl = async (gid, galleryUrl) => {
     if (!galleryUrl) { toast('No gallery URL for retry'); return; }
-    showDlModal(galleryUrl);
+    try {
+      const r = await api.retryJob(gid);
+      toast('Retry: ' + (r.message || r.status));
+      load();
+    } catch (e) { toast('Retry failed: ' + e.message); }
   };
 
   const closeOverlay = setter => e => { if (e.target.classList.contains('modal-overlay')) setter(false); };
@@ -358,7 +378,7 @@ export default function Dashboard() {
     );
   }
 
-  const { queued, completed, failed, system, total } = data;
+  const { queued, completed, failed, system, total, totalAll } = data;
   const diskFree = system?.diskFree || 0;
   const diskUsed = system?.diskUsed || 0;
 
@@ -386,7 +406,7 @@ export default function Dashboard() {
       {/* Metrics */}
       <div className="metrics">
         <div className="metric active"><div className="metric-value">{queued.length}</div><div className="metric-label">Active</div></div>
-        <div className="metric downloaded"><div className="metric-value">{total || 0}</div><div className="metric-label">Downloaded</div></div>
+        <div className="metric downloaded"><div className="metric-value">{totalAll || 0}</div><div className="metric-label">Downloaded</div></div>
         <div className="metric failed"><div className="metric-value">{failed?.length || 0}</div><div className="metric-label">Failed</div></div>
         <div className="metric">
           <div className="metric-value">{diskUsed > 0 ? fmtSize(diskUsed) : '—'}</div>
@@ -429,30 +449,46 @@ export default function Dashboard() {
         <div className="section-header">
           <span className="section-title">Gallery Library</span>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {total > 0 && <span className="section-count">{total} Galleries</span>}
+            {totalAll > 0 && (
+              <span className="section-count">
+                {search ? `${total} / ${totalAll}` : `${totalAll}`} Galleries
+              </span>
+            )}
             <a className="btn" href="/gallery" style={{ fontSize: '.65rem' }}>Gallery View →</a>
           </div>
         </div>
-        {completed?.length > 0 && (
-          <div className="search-wrap">
-            <input type="text" placeholder="Search by GID or title…" value={search} onChange={e => setSearch(e.target.value)} />
+
+        {totalAll === 0 ? (
+          /* 1. No galleries at all */
+          <div className="empty">
+            <div className="empty-icon">○</div>
+            <div className="empty-text">No galleries downloaded yet</div>
           </div>
-        )}
-        {completed?.length === 0 ? (
-          <div className="empty"><div className="empty-icon">○</div><div className="empty-text">No galleries downloaded yet</div></div>
         ) : (
           <>
-            <div className="gallery-grid">
-              {completed.filter(g => {
-                if (!search) return true;
-                const q = search.toLowerCase();
-                return String(g.gid).includes(q) || (g.title || '').toLowerCase().includes(q);
-              }).map(g => (
-                <GalleryCard key={g.gid} g={g} onDelete={handleDelete} onRefreshMeta={handleRefreshMeta} />
-              ))}
+            {/* Search (has galleries) */}
+            <div className="search-wrap">
+              <input type="text" placeholder="Search by GID or title…" value={search} onChange={e => setSearch(e.target.value)} />
             </div>
-            {total > perPage && (
-              <Paginator page={page} perPage={perPage} total={total} onPage={setPage} onPerPage={n => { setPerPage(n); setPage(1); }} />
+
+            {completed?.length === 0 ? (
+              /* 2. Search active but no matches */
+              <div className="empty">
+                <div className="empty-icon">○</div>
+                <div className="empty-text">No galleries match your search</div>
+              </div>
+            ) : (
+              /* 3. Results to display */
+              <>
+                <div className="gallery-grid">
+                  {completed.map(g => (
+                    <GalleryCard key={g.gid} g={g} onDelete={handleDelete} onRefreshMeta={handleRefreshMeta} />
+                  ))}
+                </div>
+                {total > perPage && (
+                  <Paginator page={page} perPage={perPage} total={total} onPage={setPage} onPerPage={n => { setPerPage(n); setPage(1); }} />
+                )}
+              </>
             )}
           </>
         )}

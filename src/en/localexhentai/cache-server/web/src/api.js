@@ -9,8 +9,8 @@ async function fetchJSON(url, options) {
   return r.json();
 }
 
-export function getDashboard(page = 1, perPage = 12) {
-  return fetchJSON(`/dashboard?page=${page}&perPage=${perPage}`);
+export function getDashboard(page = 1, perPage = 12, search = '') {
+  return fetchJSON(`/dashboard?page=${page}&perPage=${perPage}${search ? '&search=' + encodeURIComponent(search) : ''}`);
 }
 
 export function getSettings() {
@@ -66,4 +66,12 @@ export function getDownloadStatus(gid) {
 
 export function clearJob(gid) {
   return fetchJSON('/clear-job?gid=' + gid, { method: 'POST' });
+}
+
+export function retryJob(gid) {
+  return fetchJSON('/retry', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ gid }),
+  });
 }

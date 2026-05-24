@@ -3,7 +3,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { URL } = require('url');
-const AdmZip = require('adm-zip');
+const StreamZip = require('node-stream-zip');
 const store = require('./store');
 
 const CACHE_DIR = process.env.CACHE_DIR || '/app/cache';
@@ -113,6 +113,29 @@ function collectBody(res) {
 }
 
 // ---------------------------------------------------------------------------
+// GP balance check for archiver downloads
+// ---------------------------------------------------------------------------
+
+// Parse GP cost and balance from E-Hentai archiver page HTML
+// Cost format: <strong>X,XXX GP</strong> (org first in DOM, res second)
+// Balance format (e-hentai only): Current Funds:</p><p>X,XXX GP
+function parseGpInfo(html, dltype) {
+  // cost order is always org (left div) then res (right div)
+  const allCosts = [...html.matchAll(/Download\s+Cost[^<]*?<strong>([\d,]+)/gi)];
+  const idx = dltype === 'org' ? 0 : 1;
+  if (!allCosts[idx]) return null;
+
+  const cost = parseInt(allCosts[idx][1].replace(/,/g, ''));
+  if (isNaN(cost)) return null;
+
+  // balance: "Current Funds:" then a number + "GP"
+  const balMatch = html.match(/Current\s+Funds[^<]*?(?:<[^>]+>)*\s*([\d,]+)\s*GP/i);
+  const balance = balMatch ? parseInt(balMatch[1].replace(/,/g, '')) : null;
+
+  return { cost, balance, shortfall: balance !== null ? Math.max(0, cost - balance) : null };
+}
+
+// ---------------------------------------------------------------------------
 // Archiver flow helpers
 // ---------------------------------------------------------------------------
 
@@ -124,17 +147,86 @@ function extractToken(galleryUrl) {
 }
 
 // POST to archiver.php → get H@H archive node URL
+// First GETs the page to check GP balance, then POSTs to trigger generation
 async function archiverPost(gid, token, dltype, cookies, galleryUrl) {
-  // Use the same domain as the gallery URL (supports e-hentai.org and exhentai.org)
   const domain = galleryUrl ? new URL(galleryUrl).hostname : 'e-hentai.org';
   const ARCHIVER_URL = `https://${domain}/archiver.php`;
+  const fullUrl = `${ARCHIVER_URL}?gid=${gid}&token=${token}`;
+
+  // ── Step A: GET archiver page → check if cached, generating, or needs GP ──
+  const { res: getRes } = await httpRequest('GET', fullUrl, {
+    headers: { Cookie: cookies, 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    timeout: 15000,
+  });
+
+  // Redirect → archive is ready, follow it
+  if (getRes.statusCode >= 300 && getRes.statusCode < 400 && getRes.headers.location) {
+    console.log(`[dl] archiverPost(${gid}): GET redirected to ${getRes.headers.location}`);
+    return getRes.headers.location;
+  }
+
+  const getBody = (await collectBody(getRes)).toString('utf8');
+
+  // H@H URL in GET response → archive already cached (GP already paid)
+  const cachedMatch = getBody.match(/https?:\/\/[^\s"']*?hath\.network\/archive\/[^\s"']+/);
+  if (cachedMatch) {
+    console.log(`[dl] archiverPost(${gid}): archive already cached`);
+    return cachedMatch[0];
+  }
+
+  // Still generating → need to wait
+  if (getBody.includes('generating') || getBody.includes('Generating')) {
+    console.log(`[dl] archiverPost(${gid}): archive still being generated`);
+    throw new Error('Archive is still being generated — try again later');
+  }
+
+  // Parse GP cost from primary domain (exhentai shows cost, may not show balance)
+  let gpInfo = parseGpInfo(getBody, dltype);
+  if (gpInfo) {
+    console.log(`[dl] archiverPost(${gid}): primary domain GP cost=${gpInfo.cost}, balance=${gpInfo.balance !== null ? gpInfo.balance : 'not found'}`);
+
+    // If balance is missing on exhentai, try e-hentai.org which does show balance
+    if (gpInfo.balance === null && domain === 'exhentai.org') {
+      try {
+        const eUrl = `https://e-hentai.org/archiver.php?gid=${gid}&token=${token}`;
+        const { res: eRes } = await httpRequest('GET', eUrl, {
+          headers: { Cookie: cookies, 'User-Agent': 'Mozilla/5.0' },
+          timeout: 10000,
+        });
+        if (!(eRes.statusCode >= 300 && eRes.statusCode < 400)) {
+          const eBody = (await collectBody(eRes)).toString('utf8');
+          const eGp = parseGpInfo(eBody, dltype);
+          if (eGp && eGp.balance !== null) {
+            gpInfo.balance = eGp.balance;
+            gpInfo.shortfall = Math.max(0, gpInfo.cost - eGp.balance);
+            console.log(`[dl] archiverPost(${gid}): got balance from e-hentai: ${gpInfo.balance}`);
+          }
+        }
+      } catch (e) {
+        console.log(`[dl] archiverPost(${gid}): e-hentai balance check failed: ${e.message}`);
+      }
+    }
+
+    // Now check with potentially cross-domain balance
+    if (gpInfo.balance !== null && gpInfo.balance < gpInfo.cost) {
+      throw new Error(
+        `Insufficient GP for archive download: need ${gpInfo.cost} GP, ` +
+        `have ${gpInfo.balance} GP (shortfall ${gpInfo.shortfall} GP). ` +
+        `Download cost may be deducted from other currencies. Top up GP and retry.`
+      );
+    }
+  } else {
+    console.log(`[dl] archiverPost(${gid}): could not parse GP info, proceeding`);
+  }
+
+  // ── Step B: POST to trigger generation (original logic) ──
   const postBody = new URLSearchParams({
     dltype,
     dlcheck: dltype === 'org' ? 'Download Original Archive' : 'Download Resample Archive',
   }).toString();
 
-  console.log(`[dl] archiverPost: posting to ${ARCHIVER_URL}?gid=${gid}&token=${token}`);
-  const { res } = await httpRequest('POST', `${ARCHIVER_URL}?gid=${gid}&token=${token}`, {
+  console.log(`[dl] archiverPost: posting to ${fullUrl}`);
+  const { res: postRes } = await httpRequest('POST', fullUrl, {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Content-Length': String(Buffer.byteLength(postBody)),
@@ -145,24 +237,22 @@ async function archiverPost(gid, token, dltype, cookies, galleryUrl) {
   });
 
   // Follow redirect if present
-  if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-    return res.headers.location;
+  if (postRes.statusCode >= 300 && postRes.statusCode < 400 && postRes.headers.location) {
+    console.log(`[dl] archiverPost(${gid}): POST redirected to ${postRes.headers.location}`);
+    return postRes.headers.location;
   }
 
-  // Otherwise parse HTML for H@H URL
-  const body = (await collectBody(res)).toString('utf8');
-
-  // Log response details for debugging
+  // Parse HTML response
+  const body = (await collectBody(postRes)).toString('utf8');
   const snippet = body.slice(0, 300).replace(/\n/g, ' ').trim();
-  console.log(`[dl] archiverPost(${gid}): status=${res.statusCode}, body_len=${body.length}, snippet="${snippet}"`);
+  console.log(`[dl] archiverPost(${gid}): POST status=${postRes.statusCode}, body_len=${body.length}, snippet="${snippet}"`);
 
-  // Check for error messages
   if (body.includes('You must be logged in')) throw new Error('Authentication required — cookies missing or expired');
   if (body.includes('already generating')) {
-    console.log(`[dl] archiverPost(${gid}): archive still being generated`);
+    console.log(`[dl] archiverPost(${gid}): archive already being generated`);
   }
 
-  // Look for H@H URL pattern
+  // Look for H@H URL
   const match = body.match(/https?:\/\/[^\s"']*?hath\.network\/archive\/[^\s"']+/);
   if (match) { console.log(`[dl] archiverPost(${gid}): found H@H URL`); return match[0]; }
 
@@ -170,34 +260,49 @@ async function archiverPost(gid, token, dltype, cookies, galleryUrl) {
   const altMatch = body.match(/https?:\/\/[^\s"']*\/archive\/[^\s"']+/);
   if (altMatch) { console.log(`[dl] archiverPost(${gid}): found alt archive URL`); return altMatch[0]; }
 
-  throw new Error(`Archiver response: status ${res.statusCode}, no H@H URL found`);
+  throw new Error(`Archiver response: status ${postRes.statusCode}, no H@H URL found`);
 }
 
 // Access H@H archive node → confirm file is ready, return download URL
+// Retries up to 10 times with 30s delay when H@H reports "already being processed"
 async function hathAccess(hathUrl, cookies) {
-  const { res } = await httpRequest('GET', hathUrl, {
-    headers: { Cookie: cookies, 'User-Agent': 'Mozilla/5.0' },
-    timeout: 15000,
-  });
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    const { res } = await httpRequest('GET', hathUrl, {
+      headers: { Cookie: cookies, 'User-Agent': 'Mozilla/5.0' },
+      timeout: 15000,
+    });
 
-  const body = (await collectBody(res)).toString('utf8');
+    const body = (await collectBody(res)).toString('utf8');
 
-  if (body.includes('file ready') || body.includes('download') || res.headers['content-type']?.includes('zip')) {
-    // Already ready — download URL is the same + ?start=1
+    // Already ready
+    if (body.includes('file ready') || body.includes('download') || res.headers['content-type']?.includes('zip')) {
+      console.log(`[dl] hathAccess: file ready on attempt ${attempt}`);
+      return hathUrl.includes('?') ? `${hathUrl}&start=1` : `${hathUrl}?start=1`;
+    }
+
+    // Still generating (not yet submitted)
+    if (body.includes('generating') || body.includes('Generating')) {
+      throw new Error('Archive is still being generated — try again later');
+    }
+
+    // H@H is processing — common intermediate state, poll with delay
+    if (body.includes('already being processed') || body.includes('being processed')) {
+      console.log(`[dl] hathAccess(${attempt}): file being processed, waiting 30s...`);
+      await new Promise(r => setTimeout(r, 30000));
+      continue;
+    }
+
+    // Check for other H@H redirect
+    const match = body.match(/https?:\/\/[^\s"']*?hath\.network\/archive\/[^\s"']+/);
+    if (match) return match[0];
+
+    // Unknown response — log a snippet and try with start=1 as fallback
+    const snippet = body.slice(0, 200).replace(/\n/g, ' ').trim();
+    console.log(`[dl] hathAccess(${attempt}): unknown response, snippet="${snippet}"`);
     return hathUrl.includes('?') ? `${hathUrl}&start=1` : `${hathUrl}?start=1`;
   }
 
-  if (body.includes('generating') || body.includes('Generating')) {
-    // Archive still being generated, keep polling
-    throw new Error('Archive is still being generated — try again later');
-  }
-
-  // Check for other H@H redirect
-  const match = body.match(/https?:\/\/[^\s"']*?hath\.network\/archive\/[^\s"']+/);
-  if (match) return match[0];
-
-  // Default: try with start=1 anyway
-  return hathUrl.includes('?') ? `${hathUrl}&start=1` : `${hathUrl}?start=1`;
+  throw new Error('H@H archive not ready after multiple retries (10 attempts × 30s)');
 }
 
 // Fetch gallery page metadata (title, thumbnail) via regex parsing
@@ -298,6 +403,19 @@ function downloadZip(downloadUrl, cookies, outputPath, onProgress) {
             fileStream.end();
             fileStream.on('finish', () => {
               onProgress(100);
+              // Validate downloaded file is actually a ZIP
+              if (!isZipFile(outputPath)) {
+                try {
+                  const snippet = fs.readFileSync(outputPath, 'utf8').slice(0, 300);
+                  // Extract error message from HTML
+                  const errMatch = snippet.match(/<p>([^<]+)<\/p>/);
+                  const errMsg = errMatch ? errMatch[1].trim() : snippet.slice(0, 200).replace(/\n/g, ' ');
+                  fs.unlinkSync(outputPath);
+                  return reject(new Error(`Downloaded file is not a ZIP: ${errMsg}`));
+                } catch (e) {
+                  return reject(new Error(`Downloaded file is not a valid ZIP archive`));
+                }
+              }
               resolve();
             });
           });
@@ -337,7 +455,7 @@ function peekFileContent(filePath) {
   } catch { return ''; }
 }
 
-// Extract ZIP: use system unzip for large files, fall back to adm-zip
+// Extract ZIP: use system unzip for large files, fall back to stream-zip
 function extractArchive(zipPath, extractDir, gid) {
   return new Promise((resolve, reject) => {
     if (!isZipFile(zipPath)) {
@@ -354,7 +472,7 @@ function extractArchive(zipPath, extractDir, gid) {
 
     fs.mkdirSync(extractDir, { recursive: true });
 
-    // Try system unzip first (handles large files better)
+    // Try system unzip first (handles large files better, no memory overhead)
     const { execSync } = require('child_process');
     try {
       execSync(`unzip -o "${zipPath}" -d "${extractDir}"`, { stdio: 'pipe', timeout: 300000 });
@@ -362,30 +480,62 @@ function extractArchive(zipPath, extractDir, gid) {
       console.log(`[dl] Extracted ${files.length} files via unzip`);
       return resolve(files.length);
     } catch (unzipErr) {
-      // If unzip not available or fails, fall back to adm-zip
-      console.log(`[dl] unzip failed (${unzipErr.message}), falling back to adm-zip`);
+      console.log(`[dl] unzip failed (${unzipErr.message}), falling back to stream-zip`);
     }
 
-    try {
-      const zip = new AdmZip(zipPath);
-      const entries = zip.getEntries();
-      entries.sort((a, b) => a.entryName.localeCompare(b.entryName));
-
-      let extracted = 0;
-      for (const entry of entries) {
-        if (!entry.isDirectory) {
-          const basename = path.basename(entry.entryName);
-          const outputFile = path.join(extractDir, basename);
-          const data = entry.getData();
-          fs.writeFileSync(outputFile, data);
-          extracted++;
-        }
-      }
-      console.log(`[dl] Extracted ${extracted} files via adm-zip`);
-      resolve(extracted);
-    } catch (err) {
+    // Fallback: streaming ZIP reader (no 2 GiB limit, low memory)
+    extractWithStreamZip(zipPath, extractDir).then(resolve).catch(err => {
       reject(new Error(`Extraction failed: ${err.message}`));
-    }
+    });
+  });
+}
+
+// Streaming ZIP extraction using node-stream-zip
+function extractWithStreamZip(zipPath, extractDir) {
+  return new Promise((resolve, reject) => {
+    const zip = new StreamZip({ file: zipPath, storeEntries: true });
+    let extracted = 0;
+
+    zip.on('ready', () => {
+      const entries = Object.values(zip.entries())
+        .filter(e => !e.isDirectory)
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      if (entries.length === 0) {
+        zip.close();
+        return resolve(0);
+      }
+
+      let pending = entries.length;
+      let rejected = false;
+
+      for (const entry of entries) {
+        const outputFile = path.join(extractDir, path.basename(entry.name));
+        zip.stream(entry.name, (err, stream) => {
+          if (rejected) return;
+          if (err) { rejected = true; zip.close(); return reject(err); }
+
+          const ws = fs.createWriteStream(outputFile);
+          ws.on('finish', () => {
+            extracted++;
+            if (--pending === 0) {
+              zip.close();
+              resolve(extracted);
+            }
+          });
+          ws.on('error', (wsErr) => {
+            rejected = true;
+            zip.close();
+            reject(wsErr);
+          });
+          stream.pipe(ws);
+        });
+      }
+    });
+
+    zip.on('error', (err) => {
+      reject(err);
+    });
   });
 }
 
@@ -447,34 +597,46 @@ function processQueue() {
 }
 
 async function executeJob(job) {
-  const { gid, galleryUrl, dltype, cookies } = job;
-  console.log(`[dl] Starting archiver flow for gid=${gid}, galleryUrl=${galleryUrl}, dltype=${dltype}`);
+  const { gid, galleryUrl, dltype, cookies, _extractOnly } = job;
+  console.log(`[dl] Starting job for gid=${gid}, galleryUrl=${galleryUrl}, extractOnly=${_extractOnly}`);
+
+  let archivePath;
 
   try {
-    // Step 1: Extract token from gallery URL
-    const token = extractToken(galleryUrl);
-    if (!token) throw new Error(`Could not extract token from ${galleryUrl}`);
-    console.log(`[dl] Token: ${token}`);
+    if (_extractOnly) {
+      // Smart retry: ZIP already downloaded, skip straight to extraction
+      archivePath = path.join(CACHE_DIR, 'archives', String(gid), 'archive.zip');
+      if (!fs.existsSync(archivePath)) {
+        throw new Error('Archive ZIP not found on disk — use full re-download instead');
+      }
+      console.log(`[dl] ${gid}: archive found at ${archivePath}, skipping to extraction`);
+      store.setJob(gid, { status: 'downloading', progress: 85, message: 'Archive found, extracting...' });
+    } else {
+      // Step 1: Extract token from gallery URL
+      const token = extractToken(galleryUrl);
+      if (!token) throw new Error(`Could not extract token from ${galleryUrl}`);
+      console.log(`[dl] Token: ${token}`);
 
-    // Step 2: POST to archiver.php → H@H node URL
-    store.setJob(gid, { status: 'archiver_access', progress: 5, message: 'Contacting archiver...' });
-    let hathUrl = await archiverPost(gid, token, dltype, cookies, galleryUrl);
-    console.log(`[dl] H@H URL: ${hathUrl}`);
+      // Step 2: Check GP balance + POST to archiver.php → H@H node URL
+      store.setJob(gid, { status: 'archiver_access', progress: 5, message: 'Checking GP balance...' });
+      let hathUrl = await archiverPost(gid, token, dltype, cookies, galleryUrl);
+      console.log(`[dl] H@H URL: ${hathUrl}`);
 
-    // Step 3: Access H@H node → download URL
-    store.setJob(gid, { status: 'archiver_access', progress: 10, message: 'Accessing archive node...' });
-    const downloadUrl = await hathAccess(hathUrl, cookies);
-    console.log(`[dl] Download URL: ${downloadUrl}`);
+      // Step 3: Access H@H node → download URL
+      store.setJob(gid, { status: 'archiver_access', progress: 10, message: 'Accessing archive node...' });
+      const downloadUrl = await hathAccess(hathUrl, cookies);
+      console.log(`[dl] Download URL: ${downloadUrl}`);
 
-    // Step 4: Stream download ZIP
-    store.setJob(gid, { status: 'downloading', progress: 15, message: 'Downloading archive...' });
-    const archivePath = path.join(CACHE_DIR, 'archives', String(gid), 'archive.zip');
-    await downloadZip(downloadUrl, cookies, archivePath, (pct) => {
-      const overall = 15 + Math.floor(pct * 0.70);
-      store.setJob(gid, { status: 'downloading', progress: Math.min(overall, 85), message: `Downloading... ${pct}%` });
-    });
+      // Step 4: Stream download ZIP
+      store.setJob(gid, { status: 'downloading', progress: 15, message: 'Downloading archive...' });
+      archivePath = path.join(CACHE_DIR, 'archives', String(gid), 'archive.zip');
+      await downloadZip(downloadUrl, cookies, archivePath, (pct) => {
+        const overall = 15 + Math.floor(pct * 0.70);
+        store.setJob(gid, { status: 'downloading', progress: Math.min(overall, 85), message: `Downloading... ${pct}%` });
+      });
+    }
 
-    // Step 5: Extract ZIP
+    // Step 5: Extract ZIP (shared)
     store.setJob(gid, { status: 'extracting', progress: 88, message: 'Extracting archive...' });
     const extractDir = path.join(GALLERIES_DIR, String(gid));
     const fileCount = await extractArchive(archivePath, extractDir, gid);
@@ -534,6 +696,85 @@ async function executeJob(job) {
   }
 }
 
+// Smart retry: if archive ZIP exists on disk, skip archiver/download and go straight to extraction
+function retryJob(gid) {
+  const existingJob = store.getJob(gid);
+  if (!existingJob) return { status: 'error', gid, error: 'Job not found' };
+
+  const galleryUrl = existingJob.galleryUrl;
+  if (!galleryUrl) return { status: 'error', gid, error: 'No gallery URL for retry' };
+
+  // Check if the H@H session is burned (too many retries from different locations)
+  const prevError = (existingJob.error || '').toLowerCase();
+  const sessionBurned = prevError.includes('too many different locations');
+  if (sessionBurned) {
+    // Clean up the invalid archive if present
+    const archivePath = path.join(CACHE_DIR, 'archives', String(gid), 'archive.zip');
+    try {
+      if (fs.existsSync(archivePath)) {
+        fs.rmSync(path.dirname(archivePath), { recursive: true, force: true });
+      }
+    } catch {}
+
+    // Check how long ago the error occurred
+    const failedAt = existingJob.updatedAt ? new Date(existingJob.updatedAt).getTime() : 0;
+    const elapsed = Date.now() - failedAt;
+    const cooldownHours = 4;
+    if (elapsed < cooldownHours * 3600000) {
+      const remaining = Math.ceil((cooldownHours * 3600000 - elapsed) / 60000);
+      store.deleteJob(gid);
+      return {
+        status: 'error', gid,
+        error: `Archive session restricted (too many download attempts). The H@H node has temporarily blocked this archive. ` +
+               `Please wait ~${remaining} minutes and retry.`
+      };
+    }
+  }
+
+  const archivePath = path.join(CACHE_DIR, 'archives', String(gid), 'archive.zip');
+  // Also verify the archive is actually a ZIP (not an HTML error page saved by mistake)
+  let zipExists = fs.existsSync(archivePath);
+  if (zipExists) {
+    try {
+      const fd = fs.openSync(archivePath, 'r');
+      const buf = Buffer.alloc(4);
+      fs.readSync(fd, buf, 0, 4, 0);
+      fs.closeSync(fd);
+      zipExists = buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04;
+      if (!zipExists) {
+        console.log(`[dl] retryJob(${gid}): existing archive is not a valid ZIP, will re-download`);
+        fs.rmSync(archivePath, { force: true });
+      }
+    } catch {
+      zipExists = false;
+    }
+  }
+
+  // Clear old error state
+  store.deleteJob(gid);
+  if (activeJobs.has(gid)) activeJobs.delete(gid);
+  const qIdx = queue.findIndex(j => j.gid === gid);
+  if (qIdx >= 0) queue.splice(qIdx, 1);
+
+  const job = {
+    gid, galleryUrl,
+    dltype: existingJob.dltype || 'res',
+    cookies: existingJob.cookies || '',
+    _extractOnly: zipExists,
+  };
+
+  queue.push(job);
+  store.setJob(gid, {
+    status: 'queued', progress: zipExists ? 85 : 0,
+    galleryUrl, dltype: existingJob.dltype || 'res',
+    cookies: existingJob.cookies || '',
+    message: zipExists ? 'Archive found, resuming extraction' : 'Queued for download',
+  });
+
+  processQueue();
+  return { status: zipExists ? 'extracting' : 'queued', gid, message: zipExists ? 'Archive found, resuming extraction' : 'Queued for download' };
+}
+
 // Reload persisted queued jobs on startup (survives container restart)
 function initQueue() {
   const jobs = store.listJobs();
@@ -584,4 +825,4 @@ function getQueueInfo() {
   };
 }
 
-module.exports = { enqueue, getStatus, getQueueInfo, setMaxConcurrent, fetchGalleryMetadata };
+module.exports = { enqueue, retryJob, getStatus, getQueueInfo, setMaxConcurrent, fetchGalleryMetadata };

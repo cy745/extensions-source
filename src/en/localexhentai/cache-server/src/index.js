@@ -324,21 +324,25 @@ app.get('/api/dashboard', (req, res) => {
     .filter(j => ['queued', 'downloading', 'archiver_access', 'extracting'].includes(j.status))
     .map(j => ({ gid: j.gid, status: j.status, progress: j.progress || 0, message: j.message || '' }));
 
+  const search = (req.query.search || '').toLowerCase().trim();
   const completedAll = galleries
     .filter(g => g.status === 'completed')
     .map(g => ({
       gid: g.gid,
       title: g.title || '',
-      totalImages: store.getGalleryImageCount(g.gid),
-      size: store.getGallerySize(g.gid),
+      totalImages: g.totalImages || store.getGalleryImageCount(g.gid),
+      size: g.size || store.getGallerySize(g.gid),
       downloadedAt: g.updatedAt,
     }));
 
+  const totalAll = completedAll.length;
+  const filtered = search ? completedAll.filter(g => String(g.gid).includes(search) || (g.title || '').toLowerCase().includes(search)) : completedAll;
+
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const perPage = Math.min(100, Math.max(5, parseInt(req.query.perPage) || 20));
-  const total = completedAll.length;
+  const total = filtered.length;
   const start = (page - 1) * perPage;
-  const completed = completedAll.slice(start, start + perPage);
+  const completed = filtered.slice(start, start + perPage);
 
   const failed = jobs
     .filter(j => j.status === 'error')
@@ -346,7 +350,7 @@ app.get('/api/dashboard', (req, res) => {
 
   const disk = store.getDiskUsage();
 
-  res.json({ queued, completed, total, page, perPage, hasNext: start + perPage < total, failed, system: { diskUsed: disk.used, diskFree: disk.free } });
+  res.json({ queued, completed, totalAll, total, page, perPage, hasNext: start + perPage < total, failed, system: { diskUsed: disk.used, diskFree: disk.free } });
 });
 
 // ── Settings persistence ──
@@ -399,6 +403,14 @@ app.post('/api/download', (req, res) => {
   // Merge: client cookies override defaults
   const cookies = clientCookies ? clientCookies + '; ' + defaultCookies : defaultCookies;
   const result = downloader.enqueue(gid, galleryUrl, dltype || 'res', cookies);
+  res.json(result);
+});
+
+// Retry a failed job — smart: skip archiver/download if ZIP already exists
+app.post('/api/retry', (req, res) => {
+  const { gid } = req.body || {};
+  if (!gid) return res.status(400).json({ error: 'gid required' });
+  const result = downloader.retryJob(gid);
   res.json(result);
 });
 
@@ -559,19 +571,31 @@ app.post('/api/import', upload.single('file'), async (req, res) => {
 
     // Extract
     const { execSync } = require('child_process');
+    const StreamZip = require('node-stream-zip');
     try {
       execSync(`unzip -o "${archivePath}" -d "${extractDir}"`, { stdio: 'pipe', timeout: 300000 });
     } catch {
-      // Fallback to adm-zip
-      const AdmZip = require('adm-zip');
-      const zip = new AdmZip(archivePath);
-      const entries = zip.getEntries();
-      for (const entry of entries) {
-        if (!entry.isDirectory) {
-          const basename = path.basename(entry.entryName);
-          fs.writeFileSync(path.join(extractDir, basename), entry.getData());
-        }
-      }
+      // Fallback to streaming ZIP reader (no size limit)
+      const zip = new StreamZip({ file: archivePath, storeEntries: true });
+      await new Promise((resolve, reject) => {
+        zip.on('ready', () => {
+          const entries = Object.values(zip.entries()).filter(e => !e.isDirectory);
+          let pending = entries.length;
+          if (pending === 0) { zip.close(); return resolve(); }
+          let rejected = false;
+          for (const entry of entries) {
+            zip.stream(entry.name, (err, stream) => {
+              if (rejected) return;
+              if (err) { rejected = true; zip.close(); return reject(err); }
+              const ws = fs.createWriteStream(path.join(extractDir, path.basename(entry.name)));
+              ws.on('finish', () => { if (--pending === 0) { zip.close(); resolve(); } });
+              ws.on('error', (e) => { rejected = true; zip.close(); reject(e); });
+              stream.pipe(ws);
+            });
+          }
+        });
+        zip.on('error', reject);
+      });
     }
 
     const fileCount = fs.readdirSync(extractDir).filter(f => /\.(webp|jpg|jpeg|png|gif|avif)$/i.test(f)).length;
